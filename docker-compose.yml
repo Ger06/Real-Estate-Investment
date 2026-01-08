@@ -1,0 +1,119 @@
+services:
+  # PostgreSQL with PostGIS
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: real_estate_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: real_estate_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and Celery
+  redis:
+    image: redis:7-alpine
+    container_name: real_estate_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: real_estate_backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/real_estate_db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+
+  # Celery Worker
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: real_estate_celery_worker
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/real_estate_db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - ./backend/.env
+
+  # Celery Beat (Scheduler)
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: real_estate_celery_beat
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/logs:/app/logs
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/real_estate_db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - ./backend/.env
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: real_estate_frontend
+    command: npm run dev -- --host
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/.env:/app/.env
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_API_VERSION=v1
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:

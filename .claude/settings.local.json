@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./venv/Scripts/python.exe:*)",
+      "WebSearch",
+      "WebFetch(domain:www.zonaprop.com.ar)",
+      "Bash(npm install:*)"
+    ]
+  }
+}

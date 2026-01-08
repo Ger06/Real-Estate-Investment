@@ -1,0 +1,54 @@
+ANALISIS PARA DESARROLLO INMOBILIARIO
+ANALISIS DEL MERCADO INMOBILIARIO
+El Objetivo seria realizar la recopilación de información para su análisis, desde diferentes aspectos, finalidades
+
+. Extraer datos de propiedades de publicaciones - Argenprop, zonaprop, Remax, Mercadolibre
+... Pegar link y que extraiga diferentes datos, fotos, etc, ¿e imprima un PDF?
+... periodicamente que revise/actualice el link y registre los cambios de precio
+. Ingresar información de las visitas presenciales realizadas
+. Reunir en base de datos
+... fotos, precio, decripcion, superficies (cubierta, semicubierta, descubierta)
+Piso nivel, tipo (casa, ph, dpto), inmobiliaria, contacto, zona, etc
+.... para luego permitir analisis de las propiedades
+. Permitir agregar parametros de analisis - "Flexibilidad en el analisis"
+... Mostrar en graficos, mapas, ¿grafica flexible? Diferencia en colores, filtros
+... prcio x m²
+... precio sugerido estimado
+Ejemplos de paginas y avisos:
+Remax: https://www.remax.com.ar/listings/buy?page=0&pageSize=24&sort=%2BpriceUsd&in:operationId=1&in:eStageId=0,1,2,3,4&in:typeId=12&locations=in::::25022@Nunez:::&landingPath=&filterCount=1&viewMode=listViewMode
+
+Buscainmuebles
+https://www.buscainmueble.com/ph/venta/nunez
+
+MercadoLibre
+https://inmuebles.mercadolibre.com.ar/ph/capital-federal/nunez/ph-a-reciclar_OrderId_PRICE_NoIndex_True#unapplied_filter_id%3Dneighborhood%26unapplied_filter_name%3DBarrios%26unapplied_value_id%3DTUxBQlJFQzkyMTVa%26unapplied_value_name%3DRecoleta%26unapplied_autoselect%3Dfalse
+
+Zonaprop
+https://www.zonaprop.com.ar/ph-venta-nunez-orden-precio-ascendente-q-reciclar.html?utm_expid=10517954-19.8Uq8iRqdQoyMtgjJD5ZoOA.0&utm_referrer=http%3A%2F%2Fwww.zonaprop.com.ar%2Fq-ph-reciclar.html
+
+
+
+
+
+
+SITUACION ACTUAL
+Actualmente la recopilación de datos la realizo a través de un Excel. Ver imagen.
+ 
+
+...............
+
+     ANALISIS DE DESARROLLO DE INVERSION
+. Planilla de cotizacion
+. Seguimiento
+. Certificaciones
+. Actualizacion de precios materiales y mano de obra
+. Analisis de costos
+... Actualizacion de Precios automatico
+. Historial
+. Analisis de costos
+
+……………...........
+ANALISIS DE INVERSION
+Al final deberán reunirse ambos análisis, el del Mercado Inmobiliario + Desarrollo de Obra, para dar lugar al análisis de la Inversion Inmobiliaria. 
+-	La totalidad del proceso, se va retroalimentando entre cada una de las etapas (tema que aun me queda para desarrollar).
+-	Actualemtente lo realizo tambien a través de una planilla Excel poco practica, al igual que las otras que mencione.
