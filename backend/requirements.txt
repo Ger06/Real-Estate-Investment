@@ -31,9 +31,9 @@ lxml==5.1.0
 celery==5.3.6
 redis==5.0.1
 
-# Data Processing
-pandas==2.2.0
-numpy==1.26.3
+# Data Processing (commented for initial deploy - uncomment when needed)
+# pandas==2.2.0
+# numpy==1.26.3
 
 # PDF Generation
 weasyprint==60.2
