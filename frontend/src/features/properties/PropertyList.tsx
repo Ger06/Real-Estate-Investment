@@ -30,7 +30,7 @@ import {
   ArrowDropDown as ArrowDropDownIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
-import { propertiesApi, type Property } from '../../api/properties';
+import { propertiesApi } from '../../api/properties';
 import { useProperties } from '../../hooks/useProperties';
 
 export default function PropertyList() {
