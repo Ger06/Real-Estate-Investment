@@ -3,7 +3,7 @@ Application Configuration
 Uses Pydantic Settings for environment variable management
 """
 from typing import List, Optional, Union
-from pydantic import AnyHttpUrl, PostgresDsn, field_validator
+from pydantic import AnyHttpUrl, PostgresDsn, field_validator, computed_field, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,20 +30,23 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     
     # CORS - hardcoded for development
-    BACKEND_CORS_ORIGINS: Union[List[str], str] = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8000",
-    ]
+    BACKEND_CORS_ORIGINS_RAW: Union[str, List[str]] = Field(
+        default='["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"]',
+        validation_alias="BACKEND_CORS_ORIGINS"
+    )
 
-    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
-    @classmethod
-    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
-        raise ValueError(v)
+    @computed_field
+    @property
+    def BACKEND_CORS_ORIGINS(self) -> List[str]:
+        if isinstance(self.BACKEND_CORS_ORIGINS_RAW, str):
+            if self.BACKEND_CORS_ORIGINS_RAW.startswith("["):
+                import json
+                try:
+                    return json.loads(self.BACKEND_CORS_ORIGINS_RAW)
+                except json.JSONDecodeError:
+                    pass
+            return [i.strip() for i in self.BACKEND_CORS_ORIGINS_RAW.split(",")]
+        return self.BACKEND_CORS_ORIGINS_RAW
     
     # Database
     POSTGRES_SERVER: str = "localhost"
