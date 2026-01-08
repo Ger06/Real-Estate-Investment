@@ -65,11 +65,28 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
-    REDIS_URL: str = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-    
+    REDIS_URL: Optional[str] = None
+
+    @field_validator("REDIS_URL", mode="before")
+    @classmethod
+    def assemble_redis_connection(cls, v: Optional[str], info) -> str:
+        if isinstance(v, str):
+            return v
+
+        values = info.data
+        redis_host = values.get("REDIS_HOST", "localhost")
+        redis_port = values.get("REDIS_PORT", 6379)
+        redis_db = values.get("REDIS_DB", 0)
+        return f"redis://{redis_host}:{redis_port}/{redis_db}"
+
     # Celery
-    CELERY_BROKER_URL: str = REDIS_URL
-    CELERY_RESULT_BACKEND: str = REDIS_URL
+    @property
+    def CELERY_BROKER_URL(self) -> str:
+        return self.REDIS_URL
+
+    @property
+    def CELERY_RESULT_BACKEND(self) -> str:
+        return self.REDIS_URL
     
     # File Storage
     UPLOAD_DIR: str = "uploads"
