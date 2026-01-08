@@ -21,12 +21,10 @@ import {
   Divider,
 } from '@mui/material';
 import {
-  Add as AddIcon,
   Search as SearchIcon,
   Home as HomeIcon,
   Refresh as RefreshIcon,
   TableChart as TableChartIcon,
-  Sync as SyncIcon,
   PriceChange as PriceChangeIcon,
   Cached as CachedIcon,
   ArrowDropDown as ArrowDropDownIcon,

@@ -371,7 +371,7 @@ export default function PropertyDetail() {
                     Amenities
                   </Typography>
                   <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                    {property.amenities.list.map((amenity, idx) => (
+                    {property.amenities.list.map((amenity: string, idx: number) => (
                       <Chip key={idx} label={amenity} size="small" variant="outlined" />
                     ))}
                   </Box>
