@@ -11,7 +11,7 @@ directorio temporal y las usa en la sesión de Selenium.
 
 ### Cómo funciona actualmente (desarrollo local):
 1. _prepare_temp_profile() copia Cookies, Cookies-journal, Network/ y Local State
-   desde el perfil de Chrome del usuario (~\AppData\Local\Google\Chrome\User Data\Default)
+   desde el perfil de Chrome del usuario (~AppData/Local/Google/Chrome/User Data/Default)
    a un directorio temporal.
 2. El driver de Selenium arranca con ese perfil temporal, heredando las cookies válidas.
 3. Al cerrar, el directorio temporal se limpia automáticamente.
@@ -38,6 +38,7 @@ Opciones para producción:
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import time
 import logging
@@ -182,11 +183,60 @@ class MercadoLibreListingScraper(BaseListingScraper):
         self.driver = None
         self._temp_profile_dir = None
 
+    @staticmethod
+    def _safe_copy_file(src: str, dst: str) -> bool:
+        """
+        Copy a file even if it's locked by another process (e.g. Chrome).
+        Uses sqlite3.backup() for SQLite databases, binary read fallback otherwise.
+        """
+        # Try normal copy first
+        try:
+            shutil.copy2(src, dst)
+            return True
+        except PermissionError:
+            pass
+
+        # For SQLite databases (Cookies), use sqlite3.backup()
+        try:
+            src_conn = sqlite3.connect(f"file:{src}?mode=ro&nolock=1", uri=True)
+            dst_conn = sqlite3.connect(dst)
+            src_conn.backup(dst_conn)
+            dst_conn.close()
+            src_conn.close()
+            return True
+        except Exception:
+            pass
+
+        # Last resort: binary read (works if file allows shared read)
+        try:
+            with open(src, 'rb') as f:
+                data = f.read()
+            with open(dst, 'wb') as f:
+                f.write(data)
+            return True
+        except Exception:
+            pass
+
+        return False
+
+    def _safe_copy_tree(self, src_dir: str, dst_dir: str):
+        """Recursively copy a directory, handling locked files."""
+        os.makedirs(dst_dir, exist_ok=True)
+        for entry in os.scandir(src_dir):
+            dst_path = os.path.join(dst_dir, entry.name)
+            if entry.is_dir():
+                self._safe_copy_tree(entry.path, dst_path)
+            else:
+                self._safe_copy_file(entry.path, dst_path)
+
     def _prepare_temp_profile(self) -> str:
         """
         Copy essential cookie/session files from the user's Chrome profile
         to a temporary directory. This avoids lock file conflicts and
         corrupt state files while preserving MercadoLibre session cookies.
+
+        Handles Chrome locking Cookies files on Windows by using
+        sqlite3.backup() or binary read as fallback.
         """
         chrome_user_data = os.environ.get(
             'CHROME_USER_DATA_DIR',
@@ -202,7 +252,7 @@ class MercadoLibreListingScraper(BaseListingScraper):
         # Copy Local State (contains cookie encryption key, needed by Chrome)
         local_state_src = os.path.join(chrome_user_data, 'Local State')
         if os.path.exists(local_state_src):
-            shutil.copy2(local_state_src, temp_dir)
+            self._safe_copy_file(local_state_src, os.path.join(temp_dir, 'Local State'))
 
         # Copy only essential session/cookie files from the profile
         essential_files = [
@@ -210,15 +260,21 @@ class MercadoLibreListingScraper(BaseListingScraper):
             'Cookies-journal',
             'Network',  # directory with cookies in newer Chrome versions
         ]
+        copied = []
+        failed = []
         for filename in essential_files:
             src = os.path.join(src_profile, filename)
             dst = os.path.join(dst_profile, filename)
             if os.path.isdir(src):
-                shutil.copytree(src, dst, dirs_exist_ok=True)
+                self._safe_copy_tree(src, dst)
+                copied.append(filename)
             elif os.path.exists(src):
-                shutil.copy2(src, dst)
+                if self._safe_copy_file(src, dst):
+                    copied.append(filename)
+                else:
+                    failed.append(filename)
 
-        print(f"[DEBUG] [mercadolibre] Copied cookies from {src_profile} to {dst_profile}")
+        print(f"[DEBUG] [mercadolibre] Copied cookies from {src_profile} to {dst_profile} (copied: {copied}, failed: {failed})")
         self._temp_profile_dir = temp_dir
         return temp_dir
 
@@ -247,6 +303,18 @@ class MercadoLibreListingScraper(BaseListingScraper):
         temp_user_data = self._prepare_temp_profile()
 
         if USE_UNDETECTED:
+            # Detect installed Chrome major version to avoid driver mismatch
+            version_main = None
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
+                chrome_version, _ = winreg.QueryValueEx(key, "version")
+                winreg.CloseKey(key)
+                version_main = int(chrome_version.split('.')[0])
+                print(f"[DEBUG] [mercadolibre] Detected Chrome version: {chrome_version} (major: {version_main})")
+            except Exception as e:
+                print(f"[DEBUG] [mercadolibre] Could not detect Chrome version: {e}")
+
             print(f"[DEBUG] [mercadolibre] Using undetected-chromedriver (headless={headless})")
             options = uc.ChromeOptions()
             options.add_argument(f'--profile-directory={chrome_profile}')
@@ -258,7 +326,11 @@ class MercadoLibreListingScraper(BaseListingScraper):
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--window-size=1920,1080')
 
-            self.driver = uc.Chrome(options=options, user_data_dir=temp_user_data)
+            self.driver = uc.Chrome(
+                options=options,
+                user_data_dir=temp_user_data,
+                version_main=version_main,
+            )
         else:
             print("[DEBUG] [mercadolibre] Using regular selenium (undetected not available)")
             chrome_options = Options()
