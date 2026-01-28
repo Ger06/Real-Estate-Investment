@@ -15,6 +15,8 @@ from app.database import Base
 from app.models.user import User
 from app.models.property import Property, PropertyImage, PriceHistory, PropertyVisit
 from app.models.cost import ConstructionCost, CostHistory, InvestmentProject
+from app.models.saved_search import SavedSearch
+from app.models.pending_property import PendingProperty
 import geoalchemy2  # Required for PostGIS types in migrations
 from app.core.config import settings
 

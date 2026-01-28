@@ -27,7 +27,7 @@ class User(Base):
     # Relationships - Temporarily disabled due to circular reference issues
     # properties = relationship("Property", back_populates="created_by_user", foreign_keys="[Property.created_by]")
     # visits = relationship("PropertyVisit", back_populates="user")
-    # investment_projects = relationship("InvestmentProject", back_populates="user")
+    investment_projects = relationship("InvestmentProject", back_populates="user")
     
     def __repr__(self) -> str:
         return f"<User {self.email}>"

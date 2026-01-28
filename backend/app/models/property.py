@@ -137,7 +137,7 @@ class Property(Base):
     images = relationship("PropertyImage", back_populates="property", cascade="all, delete-orphan", lazy="selectin")
     price_history = relationship("PriceHistory", back_populates="property", cascade="all, delete-orphan", lazy="selectin")
     # visits = relationship("PropertyVisit", back_populates="property", cascade="all, delete-orphan")
-    # investment_projects = relationship("InvestmentProject", back_populates="property")
+    investment_projects = relationship("InvestmentProject", back_populates="property")
     
     # Indexes
     __table_args__ = (

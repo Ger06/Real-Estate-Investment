@@ -118,19 +118,47 @@ class ArgenpropScraper(BaseScraper):
         # Default to USD for Argentina
         return "USD"
 
+    def _extract_property_type_from_url(self) -> Optional[str]:
+        """Extract property type from URL path (most reliable)"""
+        url_lower = self.url.lower()
+
+        # Argenprop URLs: /ph-en-venta/, /departamento-en-venta/, etc.
+        if '/ph-' in url_lower or '/ph/' in url_lower:
+            return "ph"
+        elif '/departamento' in url_lower or '/depto' in url_lower:
+            return "departamento"
+        elif '/casa' in url_lower:
+            return "casa"
+        elif '/terreno' in url_lower or '/lote' in url_lower:
+            return "terreno"
+        elif '/local' in url_lower:
+            return "local"
+        elif '/oficina' in url_lower:
+            return "oficina"
+        elif '/cochera' in url_lower or '/garage' in url_lower:
+            return "cochera"
+
+        return None
+
     def _extract_property_type(self) -> str:
         """Extract property type"""
-        # Common patterns in title or description
+        # Priority 1: URL path (most reliable)
+        url_type = self._extract_property_type_from_url()
+        if url_type:
+            return url_type
+
+        # Priority 2: Text mining (check specific types first)
         title = self._extract_title().lower()
         desc = self._extract_description().lower()
         combined = f"{title} {desc}"
 
-        if 'departamento' in combined or 'depto' in combined:
+        # Check PH first (more specific than departamento)
+        if ' ph ' in combined or combined.startswith('ph ') or 'propiedad horizontal' in combined:
+            return "ph"
+        elif 'departamento' in combined or 'depto' in combined:
             return "departamento"
         elif 'casa' in combined:
             return "casa"
-        elif 'ph' in combined:
-            return "ph"
         elif 'terreno' in combined or 'lote' in combined:
             return "terreno"
         elif 'local' in combined or 'comercial' in combined:
@@ -178,26 +206,80 @@ class ArgenpropScraper(BaseScraper):
 
     def _extract_location(self) -> Dict[str, Any]:
         """Extract location data"""
-        selectors = [
-            '.location',
-            '[class*="location"]',
-            '.property-location',
-            'address',
-        ]
+        if not self.soup:
+            return {"neighborhood": "", "city": "Buenos Aires", "province": "Buenos Aires"}
 
-        location_text = ""
-        for selector in selectors:
-            location_text = self.extract_text(selector)
-            if location_text:
-                break
+        neighborhood = ""
+        city = ""
+        province = "Buenos Aires"
 
-        # Parse location (usually format: "Neighborhood, City, Province")
-        parts = [p.strip() for p in location_text.split(',')]
+        # Strategy 1: Look for titlebar with format "Venta en Coghlan, Capital Federal"
+        titlebar = self.soup.select_one('h2.titlebar__title')
+        if titlebar:
+            text = titlebar.get_text(strip=True)
+            # Parse "Venta en Coghlan, Capital Federal" or "Alquiler en Palermo, Capital Federal"
+            match = re.search(r'(?:Venta|Alquiler|Alquiler temporario)\s+en\s+([^,]+),\s*(.+)', text, re.IGNORECASE)
+            if match:
+                neighborhood = match.group(1).strip()
+                city = match.group(2).strip()
+
+        # Strategy 2: Look for spans with location info
+        if not neighborhood:
+            # Argenprop sometimes has spans with just the neighborhood/city
+            for span in self.soup.find_all('span'):
+                text = span.get_text(strip=True)
+                if text and len(text) < 50:
+                    text_lower = text.lower()
+                    # Check if it's a known neighborhood
+                    known_neighborhoods = [
+                        'palermo', 'belgrano', 'recoleta', 'caballito', 'coghlan',
+                        'villa crespo', 'colegiales', 'nuñez', 'nunez', 'almagro',
+                        'san telmo', 'villa urquiza', 'saavedra', 'chacarita',
+                        'villa devoto', 'flores', 'floresta', 'boedo', 'barracas'
+                    ]
+                    for nb in known_neighborhoods:
+                        if text_lower == nb:
+                            neighborhood = text
+                            break
+                    if text_lower == 'capital federal':
+                        city = text
+
+        # Strategy 3: Traditional selectors
+        if not neighborhood:
+            selectors = [
+                '.location',
+                '[class*="location"]',
+                '.property-location',
+            ]
+
+            for selector in selectors:
+                location_text = self.extract_text(selector)
+                if location_text:
+                    parts = [p.strip() for p in location_text.split(',')]
+                    if len(parts) >= 1 and not neighborhood:
+                        neighborhood = parts[0]
+                    if len(parts) >= 2 and not city:
+                        city = parts[1]
+                    break
+
+        # Strategy 4: Extract from URL as fallback
+        # URL format: /ph-en-venta-en-coghlan-3-ambientes--18186163
+        if not neighborhood:
+            url_lower = self.url.lower()
+            match = re.search(r'-en-([a-z-]+)-\d+-ambientes', url_lower)
+            if match:
+                neighborhood = match.group(1).replace('-', ' ').title()
+
+        # Normalize city
+        if not city:
+            city = "Buenos Aires"
+        if "capital federal" in city.lower():
+            province = "Capital Federal"
 
         return {
-            "neighborhood": parts[0] if len(parts) > 0 else "",
-            "city": parts[1] if len(parts) > 1 else "Buenos Aires",
-            "province": parts[2] if len(parts) > 2 else "Buenos Aires",
+            "neighborhood": neighborhood,
+            "city": city,
+            "province": province,
         }
 
     def _extract_address(self) -> str:
