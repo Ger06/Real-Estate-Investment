@@ -15,6 +15,8 @@ import PropertyList from './features/properties/PropertyList';
 import PropertyDetail from './features/properties/PropertyDetail';
 import PropertyAnalysis from './features/properties/PropertyAnalysis';
 import PropertyScrape from './features/properties/PropertyScrape';
+import SavedSearchList from './features/saved-searches/SavedSearchList';
+import PendingProperties from './features/saved-searches/PendingProperties';
 import Layout from './components/layout/Layout';
 
 const queryClient = new QueryClient({
@@ -48,6 +50,8 @@ function App() {
               <Route path="properties/analysis" element={<PropertyAnalysis />} />
               <Route path="properties/:id" element={<PropertyDetail />} />
               <Route path="properties/scrape" element={<PropertyScrape />} />
+              <Route path="saved-searches" element={<SavedSearchList />} />
+              <Route path="saved-searches/:id/pending" element={<PendingProperties />} />
             </Route>
           </Routes>
         </Router>

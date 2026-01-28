@@ -4,7 +4,7 @@ Aggregates all API endpoints
 """
 from fastapi import APIRouter
 
-from app.api.v1 import auth, properties, analytics, costs, investments
+from app.api.v1 import auth, properties, analytics, costs, investments, saved_searches, pending_properties, remax_cache
 
 
 api_router = APIRouter()
@@ -15,3 +15,6 @@ api_router.include_router(properties.router, prefix="/properties", tags=["proper
 api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 api_router.include_router(costs.router, prefix="/costs", tags=["costs"])
 api_router.include_router(investments.router, prefix="/investments", tags=["investments"])
+api_router.include_router(saved_searches.router, prefix="/saved-searches", tags=["saved-searches"])
+api_router.include_router(pending_properties.router, prefix="/pending-properties", tags=["pending-properties"])
+api_router.include_router(remax_cache.router, prefix="/remax-cache", tags=["remax-cache"])

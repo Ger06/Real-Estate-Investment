@@ -172,42 +172,85 @@ class RemaxScraper(BaseScraper):
     def _extract_location(self, listing_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract location data"""
         neighborhood = ""
-        city = "Buenos Aires"
+        city = ""
         province = "Buenos Aires"
 
-        # Try to parse from publicationAddress (JSON)
-        address = listing_data.get("publicationAddress", "")
-
-        if address:
-            # Remax format is usually: "Street Address, Neighborhood, City"
-            parts = [p.strip() for p in address.split(',')]
-
-            if len(parts) >= 2:
-                # Last part is usually city
-                city = parts[-1]
-                # Second to last is neighborhood
-                if len(parts) >= 2:
-                    neighborhood = parts[-2] if len(parts) == 3 else parts[0]
-
-        # Check if there's a location object with neighborhood info
+        # Priority 1: Check if there's a location/neighborhood object in JSON
         if 'neighborhood' in listing_data:
             neighborhood_obj = listing_data['neighborhood']
             if isinstance(neighborhood_obj, dict):
-                neighborhood = neighborhood_obj.get('name', neighborhood)
+                neighborhood = neighborhood_obj.get('name', '')
+            elif isinstance(neighborhood_obj, str):
+                neighborhood = neighborhood_obj
 
-        # Fallback: extract from title or description
-        if not neighborhood:
-            title = listing_data.get("title", "")
-            # Look for "Palermo", "Belgrano", etc.
-            import re
-            match = re.search(r'(Palermo|Belgrano|Recoleta|Caballito|Villa Crespo|Colegiales|Núñez|Almagro|San Telmo|La Boca)', title, re.IGNORECASE)
-            if match:
-                neighborhood = match.group(1)
+        if 'city' in listing_data:
+            city_obj = listing_data['city']
+            if isinstance(city_obj, dict):
+                city = city_obj.get('name', '')
+            elif isinstance(city_obj, str):
+                city = city_obj
 
-        # Try to extract city from title (e.g., "Capital Federal")
+        if 'state' in listing_data or 'province' in listing_data:
+            prov_obj = listing_data.get('state') or listing_data.get('province')
+            if isinstance(prov_obj, dict):
+                province = prov_obj.get('name', province)
+            elif isinstance(prov_obj, str):
+                province = prov_obj
+
+        # Priority 2: Parse from publicationAddress
+        # Remax format: "Street 1234, Neighborhood, City" or "Neighborhood, City"
+        if not neighborhood or not city:
+            address = listing_data.get("publicationAddress", "")
+            if address:
+                parts = [p.strip() for p in address.split(',') if p.strip()]
+
+                if len(parts) == 1:
+                    # Just one part - could be neighborhood or city
+                    if not city:
+                        city = parts[0]
+                elif len(parts) == 2:
+                    # "Neighborhood, City" or "Street, City"
+                    if not neighborhood:
+                        neighborhood = parts[0]
+                    if not city:
+                        city = parts[1]
+                elif len(parts) >= 3:
+                    # "Street, Neighborhood, City"
+                    if not neighborhood:
+                        neighborhood = parts[-2]  # Second to last
+                    if not city:
+                        city = parts[-1]  # Last
+
+        # Priority 3: Extract from title
         title = listing_data.get("title", "")
-        if "Capital Federal" in title:
-            city = "Capital Federal"
+
+        # Known neighborhoods to look for
+        known_neighborhoods = [
+            'Palermo', 'Belgrano', 'Recoleta', 'Caballito', 'Villa Crespo',
+            'Colegiales', 'Núñez', 'Nunez', 'Almagro', 'San Telmo', 'La Boca',
+            'Villa Urquiza', 'Saavedra', 'Coghlan', 'Chacarita', 'Villa Devoto',
+            'Flores', 'Floresta', 'Boedo', 'Barracas', 'Puerto Madero',
+            'Retiro', 'San Nicolás', 'San Nicolas', 'Monserrat', 'Constitución',
+            'Parque Patricios', 'Parque Chacabuco', 'Villa del Parque',
+            'Villa Pueyrredón', 'Villa Pueyrredon', 'Liniers', 'Mataderos'
+        ]
+
+        if not neighborhood:
+            for nb in known_neighborhoods:
+                if nb.lower() in title.lower():
+                    neighborhood = nb
+                    break
+
+        # Extract city from title
+        if not city:
+            if "Capital Federal" in title or "CABA" in title:
+                city = "Capital Federal"
+
+        # Defaults
+        if not city:
+            city = "Buenos Aires"
+        if "capital federal" in city.lower() or "caba" in city.lower():
+            province = "Capital Federal"
 
         return {
             "neighborhood": neighborhood,

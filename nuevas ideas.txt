@@ -1,0 +1,29 @@
+Punteo de ideas
+. parametros editables
+. precio actualizar automaticamente, registrar fecha de actualizacion, historial de actualizaciones
+. Posibilidad de ingresar Precio de cierre...
+. Estado Vendido a cuanto + Fecha
+. Fecha de publicacion
+. Ver en mapa
+... Necesidad de ver analisis en mapa
+.. Identificar disponibles / vendidas / canceladas por colores
+… mapa tipo Booking, pero con información y grafica diferentes
+… Filtros
+… Apertura de menú lateral con caracateristicas de la propiedad.
+… Apertura de ventna con grafico cartesiano con línea (o líneas) de evolución, según parámetros.
+. cada propiedad
+... 6 colores + barras/puntos + notas
+... Estimacion de costo de obra
+... Estimacion precio de venta
+... Estimacion rentabilidad optimista/promedio/pesismista
+
+. link Costo de obra desglose
+. Puntuacion
+. Mapa de Reporte Inmobiliario, actulizacion
+. Analisis linea evolucion.
+. Desglose
+. Extraccion desde listado
+. Mapa
+... Posibilidad de edicion
+... Identificar elementos urbanos significativos
+... Zonas, colores, puntos

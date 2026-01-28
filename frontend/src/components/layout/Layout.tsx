@@ -23,6 +23,7 @@ import {
   Home as HomeIcon,
   Assessment as AssessmentIcon,
   AttachMoney as MoneyIcon,
+  Search as SearchIcon,
   Logout as LogoutIcon,
 } from '@mui/icons-material';
 import { useAuthStore } from '../../store/authStore';
@@ -46,6 +47,7 @@ export default function Layout() {
   const menuItems = [
     { text: 'Dashboard', icon: <DashboardIcon />, path: '/' },
     { text: 'Propiedades', icon: <HomeIcon />, path: '/properties' },
+    { text: 'Búsquedas', icon: <SearchIcon />, path: '/saved-searches' },
     { text: 'Análisis', icon: <AssessmentIcon />, path: '/analytics' },
     { text: 'Inversiones', icon: <MoneyIcon />, path: '/investments' },
   ];

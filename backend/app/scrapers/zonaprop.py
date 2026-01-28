@@ -63,6 +63,9 @@ class ZonapropScraper(BaseScraper):
         if not self.soup:
             raise ValueError("HTML not parsed. Call fetch_page() first.")
 
+        # Check if page was redirected to a different property
+        redirect_warning = self._detect_redirect()
+
         data = {
             "source": "zonaprop",
             "title": self._extract_title(),
@@ -80,7 +83,45 @@ class ZonapropScraper(BaseScraper):
             "status": self._extract_status(),
         }
 
+        if redirect_warning:
+            data["warning"] = redirect_warning
+
         return data
+
+    def _detect_redirect(self) -> Optional[str]:
+        """
+        Detect if Zonaprop redirected to a different property.
+        Returns a warning message if redirect detected, None otherwise.
+        """
+        # Extract expected ID from URL
+        url_id_match = re.search(r'-(\d+)\.html', self.url)
+        expected_id = url_id_match.group(1) if url_id_match else None
+
+        if not expected_id:
+            return None
+
+        # Check canonical URL or page content for actual ID
+        if self.soup:
+            # Check canonical link
+            canonical = self.soup.find('link', rel='canonical')
+            if canonical and canonical.get('href'):
+                canonical_match = re.search(r'-(\d+)\.html', canonical['href'])
+                actual_id = canonical_match.group(1) if canonical_match else None
+
+                if actual_id and actual_id != expected_id:
+                    return f"Posible redirección: URL solicitada ID={expected_id}, página muestra ID={actual_id}. La propiedad original puede haber sido removida."
+
+            # Also check URL keywords vs page title
+            url_lower = self.url.lower()
+            title_tag = self.soup.find('title')
+            page_title = title_tag.get_text().lower() if title_tag else ""
+
+            # Check for CABA/Capital Federal mismatch
+            if ('capital-federal' in url_lower or 'coghlan' in url_lower or 'palermo' in url_lower) \
+                    and ('rosario' in page_title or 'santa fe' in page_title or 'cordoba' in page_title):
+                return "Posible redirección: La URL indica Capital Federal pero la página muestra otra provincia. La propiedad original puede haber sido removida."
+
+        return None
 
     def _extract_title(self) -> str:
         """Extract property title"""
@@ -158,18 +199,47 @@ class ZonapropScraper(BaseScraper):
 
         return "USD"
 
+    def _extract_property_type_from_url(self) -> Optional[str]:
+        """Extract property type from URL path (most reliable)"""
+        url_lower = self.url.lower()
+
+        # Zonaprop URLs: /propiedades/ph-..., /propiedades/departamento-..., etc.
+        if '/ph-' in url_lower or '/ph/' in url_lower or '-ph-' in url_lower:
+            return "ph"
+        elif '/departamento' in url_lower or '-departamento' in url_lower:
+            return "departamento"
+        elif '/casa' in url_lower or '-casa-' in url_lower:
+            return "casa"
+        elif '/terreno' in url_lower or '/lote' in url_lower:
+            return "terreno"
+        elif '/local' in url_lower:
+            return "local"
+        elif '/oficina' in url_lower:
+            return "oficina"
+        elif '/cochera' in url_lower:
+            return "cochera"
+
+        return None
+
     def _extract_property_type(self) -> str:
         """Extract property type"""
+        # Priority 1: URL path (most reliable)
+        url_type = self._extract_property_type_from_url()
+        if url_type:
+            return url_type
+
+        # Priority 2: Text mining (check specific types first)
         title = self._extract_title().lower()
         desc = self._extract_description().lower()
         combined = f"{title} {desc}"
 
-        if 'departamento' in combined or 'depto' in combined:
+        # Check PH first (more specific than departamento)
+        if ' ph ' in combined or combined.startswith('ph ') or 'propiedad horizontal' in combined:
+            return "ph"
+        elif 'departamento' in combined or 'depto' in combined:
             return "departamento"
         elif 'casa' in combined:
             return "casa"
-        elif 'ph' in combined:
-            return "ph"
         elif 'terreno' in combined or 'lote' in combined:
             return "terreno"
         elif 'local' in combined or 'comercial' in combined:
@@ -215,40 +285,176 @@ class ZonapropScraper(BaseScraper):
 
     def _extract_location(self) -> Dict[str, Any]:
         """Extract location data"""
-        selectors = [
-            '[data-qa="POSTING_CARD_LOCATION"]',
-            '.location',
-            '[class*="location"]',
-            '.posting-location',
-        ]
+        if not self.soup:
+            return {"neighborhood": "", "city": "Buenos Aires", "province": "Buenos Aires"}
 
-        location_text = ""
-        for selector in selectors:
-            location_text = self.extract_text(selector)
-            if location_text:
-                break
+        neighborhood = ""
+        city = ""
+        province = "Buenos Aires"
 
-        # Parse location (format varies: "Palermo, Capital Federal")
-        parts = [p.strip() for p in location_text.split(',')]
+        # Strategy 1: Look for h4 with full address (most reliable for Zonaprop)
+        # Format: "Superí 2900, Coghlan, Capital Federal"
+        for h4 in self.soup.find_all('h4'):
+            text = h4.get_text(strip=True)
+            if 'capital federal' in text.lower() or 'buenos aires' in text.lower():
+                parts = [p.strip() for p in text.split(',') if p.strip()]
+                if len(parts) >= 2:
+                    # Last part is city, second to last is neighborhood
+                    city = parts[-1]
+                    neighborhood = parts[-2] if len(parts) >= 2 else ""
+                    break
+
+        # Strategy 2: Try breadcrumbs (order: Province -> City -> Neighborhoods... -> Title)
+        if not neighborhood:
+            breadcrumbs = self.soup.select('nav[class*="breadcrumb"] a, .breadcrumb a')
+            if len(breadcrumbs) >= 2:
+                parts = [b.get_text(strip=True) for b in breadcrumbs if b.get_text(strip=True)]
+                # Filter out navigation items
+                skip_items = ['zonaprop', 'home', 'inicio', 'inmuebles', 'propiedades',
+                              'ph', 'departamentos', 'casas', 'comprar', 'alquilar', 'venta', 'alquiler',
+                              'departamento', 'casa', 'terreno', 'local', 'oficina', 'cochera']
+                filtered = [p for p in parts if p.lower() not in skip_items]
+
+                # Last item is often the property title (long text), exclude it
+                # Property titles are usually longer than location names
+                if filtered and len(filtered[-1]) > 50:
+                    filtered = filtered[:-1]
+
+                # Zonaprop breadcrumb order: Province -> City -> Area -> Neighborhood
+                # Examples:
+                #   Santa Fe -> Rosario -> Distrito Centro -> Abasto
+                #   Buenos Aires -> Capital Federal -> Coghlan
+                if len(filtered) >= 2:
+                    # Look for Capital Federal or province indicators
+                    for i, part in enumerate(filtered):
+                        part_lower = part.lower()
+                        if part_lower in ['capital federal', 'caba', 'buenos aires ciudad']:
+                            city = "Capital Federal"
+                            province = "Capital Federal"
+                            # Everything after this is neighborhood info
+                            if i + 1 < len(filtered):
+                                neighborhood = filtered[-1]  # Take last as most specific
+                            break
+                        elif part_lower in ['buenos aires', 'santa fe', 'cordoba', 'mendoza']:
+                            province = part
+                            # Next item is likely city
+                            if i + 1 < len(filtered):
+                                city = filtered[i + 1]
+                            # Last item is neighborhood
+                            if i + 2 < len(filtered):
+                                neighborhood = filtered[-1]
+                            break
+                    else:
+                        # Fallback: assume second to last is city, last is neighborhood
+                        city = filtered[-2] if len(filtered) >= 2 else ""
+                        neighborhood = filtered[-1] if filtered else ""
+                elif len(filtered) == 1:
+                    city = filtered[0]
+
+        # Strategy 3: Look for spans with location info
+        if not neighborhood:
+            # Find span containing neighborhood near "Capital Federal"
+            for span in self.soup.find_all('span'):
+                text = span.get_text(strip=True)
+                if text and len(text) < 30:
+                    if text.lower() == 'capital federal':
+                        city = text
+                    elif text.lower() in ['coghlan', 'palermo', 'belgrano', 'recoleta', 'caballito',
+                                          'villa crespo', 'nunez', 'nuñez', 'almagro', 'san telmo',
+                                          'villa urquiza', 'saavedra', 'chacarita', 'villa devoto',
+                                          'flores', 'floresta', 'boedo', 'barracas']:
+                        neighborhood = text
+
+        # Strategy 4: Try specific Zonaprop selectors
+        if not neighborhood:
+            selectors = [
+                'h2.title-location',
+                'h3.title-location',
+                '.title-location',
+            ]
+            for selector in selectors:
+                elem = self.soup.select_one(selector)
+                if elem:
+                    text = elem.get_text(strip=True)
+                    if text and len(text) < 100:
+                        parts = [p.strip() for p in text.split(',') if p.strip()]
+                        if len(parts) >= 2:
+                            neighborhood = parts[0]
+                            city = parts[1]
+                        break
+
+        # Normalize
+        if not city:
+            city = "Buenos Aires"
+        if "capital federal" in city.lower() or "caba" in city.lower():
+            province = "Capital Federal"
+            city = "Capital Federal"
 
         return {
-            "neighborhood": parts[0] if len(parts) > 0 else "",
-            "city": parts[1] if len(parts) > 1 else "Buenos Aires",
-            "province": parts[2] if len(parts) > 2 else "Buenos Aires",
+            "neighborhood": neighborhood,
+            "city": city,
+            "province": province,
         }
 
     def _extract_address(self) -> str:
         """Extract street address"""
+        if not self.soup:
+            return ""
+
+        # Strategy 1: Look for h4 with full address containing street number
+        # Format: "Superí 2900, Coghlan, Capital Federal"
+        for h4 in self.soup.find_all('h4'):
+            text = h4.get_text(strip=True)
+            # Check if it has a number (street number) and location keywords
+            if any(c.isdigit() for c in text):
+                if 'capital federal' in text.lower() or 'buenos aires' in text.lower() or ',' in text:
+                    # Extract just the street part (before neighborhood)
+                    parts = [p.strip() for p in text.split(',')]
+                    if parts:
+                        return parts[0]  # Return just "Superí 2900"
+
+        # Strategy 2: Try specific Zonaprop selectors
         selectors = [
-            '[class*="address"]',
-            '.street-address',
+            'h3.title-address',
+            'h4.title-address',
+            '.title-address',
             '[data-qa="POSTING_CARD_ADDRESS"]',
+            '[class*="address-title"]',
+            '.street-address',
+            '[class*="PostingAddress"]',
         ]
 
         for selector in selectors:
-            addr = self.extract_text(selector)
-            if addr:
-                return addr
+            elem = self.soup.select_one(selector)
+            if elem:
+                addr = elem.get_text(strip=True)
+                if addr and len(addr) > 3:
+                    return addr
+
+        # Strategy 3: Look in JSON-LD structured data
+        for script in self.soup.find_all('script', type='application/ld+json'):
+            try:
+                if script.string:
+                    data = json.loads(script.string)
+                    if isinstance(data, dict):
+                        address = data.get('address', {})
+                        if isinstance(address, dict):
+                            street = address.get('streetAddress', '')
+                            if street:
+                                return street
+            except (json.JSONDecodeError, AttributeError):
+                continue
+
+        # Strategy 4: Look for elements with address-like content
+        for elem in self.soup.find_all(['p', 'span', 'div', 'h3', 'h4']):
+            classes = elem.get('class', [])
+            class_str = ' '.join(classes) if classes else ''
+
+            if 'address' in class_str.lower() or 'direccion' in class_str.lower():
+                text = elem.get_text(strip=True)
+                if text and len(text) > 3 and len(text) < 200:
+                    if any(c.isdigit() for c in text) or any(x in text.lower() for x in ['calle', 'av.', 'avenida', 'pasaje']):
+                        return text
 
         return ""
 
