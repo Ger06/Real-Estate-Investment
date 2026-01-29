@@ -262,29 +262,32 @@ class ZonapropListingScraper(BaseListingScraper):
 
     async def fetch_page(self, url: str) -> str:
         """
-        Fetch page using Selenium to bypass Cloudflare.
-
-        Args:
-            url: URL to fetch
-
-        Returns:
-            HTML content as string
+        Fetch page: try httpx first, fall back to Selenium if Cloudflare blocks.
+        This allows the scraper to work on servers without Chrome (e.g. Render).
         """
+        # Try httpx first (works without Chrome)
+        try:
+            html = await super().fetch_page(url)
+            if len(html) > 5000 and 'cf-browser-verification' not in html:
+                print(f"[DEBUG] [zonaprop] httpx fetch OK, length: {len(html)}")
+                return html
+            print("[DEBUG] [zonaprop] httpx got Cloudflare challenge, trying Selenium...")
+        except Exception as e:
+            print(f"[DEBUG] [zonaprop] httpx failed: {e}, trying Selenium...")
+
+        # Fall back to Selenium
         driver = self._get_driver()
 
         try:
             print(f"[DEBUG] [zonaprop] Selenium loading: {url}")
             driver.get(url)
 
-            # Wait for page to load (Cloudflare bypass)
             WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
 
-            # Additional wait for dynamic content
             time.sleep(4)
 
-            # Wait for property cards to load
             try:
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, '[data-qa="posting PROPERTY"], .postingCard, [class*="PostingCard"]'))
@@ -293,7 +296,7 @@ class ZonapropListingScraper(BaseListingScraper):
                 print("[DEBUG] [zonaprop] No property cards found with expected selectors, continuing anyway")
 
             html = driver.page_source
-            print(f"[DEBUG] [zonaprop] Got HTML, length: {len(html)}")
+            print(f"[DEBUG] [zonaprop] Got HTML via Selenium, length: {len(html)}")
             return html
 
         except Exception as e:
