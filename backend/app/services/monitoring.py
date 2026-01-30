@@ -162,6 +162,12 @@ class MonitoringService:
 
                     except Exception as e:
                         logger.error(f"Error processing card {card.get('source_url')}: {e}")
+                        # Rollback to clear any failed transaction state
+                        # (prevents PendingRollbackError cascade to subsequent cards)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
                         results['errors'].append({
                             'portal': portal,
                             'url': card.get('source_url'),
@@ -278,6 +284,8 @@ class MonitoringService:
             discovered_at=datetime.utcnow(),
         )
         self.db.add(pending)
+        # Flush to persist pending before auto-scrape attempt
+        await self.db.flush()
 
         # Auto-scrape if enabled
         if search.auto_scrape:
@@ -288,10 +296,41 @@ class MonitoringService:
                     pending.property_id = property_id
                     pending.scraped_at = datetime.utcnow()
                     return True, 'scraped'
+                else:
+                    # _scrape_and_save_property returned None → validation failed
+                    pending.status = PendingPropertyStatus.ERROR
+                    pending.error_message = "Datos insuficientes (posible bloqueo Cloudflare)"
             except Exception as e:
                 logger.error(f"Auto-scrape failed for {source_url}: {e}")
-                pending.status = PendingPropertyStatus.ERROR
-                pending.error_message = str(e)[:500]
+                # Rollback the failed scrape, then re-attach pending
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
+                # Re-fetch pending after rollback (it was flushed before)
+                stmt_refetch = select(PendingProperty).where(PendingProperty.source_url == source_url)
+                refetch_result = await self.db.execute(stmt_refetch)
+                pending_refetched = refetch_result.scalar_one_or_none()
+                if pending_refetched:
+                    pending_refetched.status = PendingPropertyStatus.ERROR
+                    pending_refetched.error_message = str(e)[:500]
+                else:
+                    # Pending was lost in rollback, re-create it
+                    pending = PendingProperty(
+                        saved_search_id=search.id,
+                        source_url=source_url,
+                        source=PropertySource(portal),
+                        source_id=card.get('source_id'),
+                        title=card.get('title'),
+                        price=card.get('price'),
+                        currency=card.get('currency'),
+                        thumbnail_url=card.get('thumbnail_url'),
+                        location_preview=card.get('location_preview'),
+                        status=PendingPropertyStatus.ERROR,
+                        error_message=str(e)[:500],
+                        discovered_at=datetime.utcnow(),
+                    )
+                    self.db.add(pending)
 
         return True, 'pending'
 
@@ -315,6 +354,10 @@ class MonitoringService:
         # Scrape property data
         scraped_data = await scraper.scrape()
         scraped_data['source_url'] = url
+
+        # Validate scraped data — detect Cloudflare-blocked or garbage pages
+        if not self._validate_scraped_data(scraped_data, url):
+            return None
 
         # Convert to Property model
         property_data = self._scraped_to_property(scraped_data)
@@ -408,6 +451,41 @@ class MonitoringService:
 
         return property_data
 
+    def _validate_scraped_data(self, scraped_data: dict, url: str) -> bool:
+        """
+        Validate that scraped data is real property data, not a Cloudflare
+        challenge page or other garbage.
+
+        Returns True if data looks valid, False if it should be skipped.
+        """
+        title = scraped_data.get('title', '') or ''
+        price = scraped_data.get('price')
+
+        # Detect Cloudflare-blocked page: title is the domain name
+        blocked_titles = [
+            'www.zonaprop.com.ar', 'zonaprop.com.ar',
+            'www.argenprop.com', 'argenprop.com',
+            'www.remax.com.ar', 'remax.com.ar',
+            'inmuebles.mercadolibre.com.ar', 'mercadolibre.com.ar',
+            'just a moment', 'checking your browser',
+            'attention required', 'access denied',
+        ]
+        title_lower = title.strip().lower()
+        if title_lower in blocked_titles:
+            logger.warning(
+                f"[validate] Skipping {url}: title '{title}' indicates blocked/challenge page"
+            )
+            return False
+
+        # Price is required — null price means scraper couldn't extract data
+        if price is None or price == 0:
+            logger.warning(
+                f"[validate] Skipping {url}: no price extracted (price={price})"
+            )
+            return False
+
+        return True
+
     async def scrape_pending_properties(
         self,
         search_id: Optional[UUID] = None,
@@ -459,12 +537,26 @@ class MonitoringService:
 
             except Exception as e:
                 logger.error(f"Error scraping {pending.source_url}: {e}")
-                pending.status = PendingPropertyStatus.ERROR
-                pending.error_message = str(e)[:500]
+                # Rollback to clear failed transaction state before continuing
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
+                # Re-fetch pending to re-attach to session after rollback
+                try:
+                    stmt_refetch = select(PendingProperty).where(PendingProperty.id == pending.id)
+                    refetch_result = await self.db.execute(stmt_refetch)
+                    pending = refetch_result.scalar_one_or_none()
+                    if pending:
+                        pending.status = PendingPropertyStatus.ERROR
+                        pending.error_message = str(e)[:500]
+                        await self.db.commit()
+                except Exception as inner_e:
+                    logger.error(f"Failed to update pending status: {inner_e}")
                 results['errors'] += 1
                 results['error_details'].append({
-                    'pending_id': str(pending.id),
-                    'url': pending.source_url,
+                    'pending_id': str(pending.id) if pending else 'unknown',
+                    'url': pending.source_url if pending else 'unknown',
                     'error': str(e),
                 })
 
