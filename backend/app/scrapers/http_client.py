@@ -79,30 +79,38 @@ async def fetch_with_browser_fingerprint(
     headers = {**BROWSER_HEADERS, "User-Agent": ua}
 
     # Method 1: curl_cffi with Chrome TLS fingerprint
+    # Try multiple impersonation profiles — different Cloudflare configs block different fingerprints
     if HAS_CURL_CFFI:
-        try:
-            response = curl_requests.get(
-                url,
-                headers=headers,
-                impersonate="chrome",
-                timeout=timeout,
-                allow_redirects=True,
-            )
-            if response.status_code == 200 and len(response.content) > 1000:
-                html = _decode_content(response.content)
-                # Verify it's not a Cloudflare challenge page
-                if 'cf-browser-verification' not in html:
-                    logger.debug(f"curl_cffi OK for {url} (status={response.status_code}, len={len(html)})")
-                    return html
-                else:
-                    logger.warning(f"curl_cffi got Cloudflare challenge for {url}")
-            else:
-                logger.warning(
-                    f"curl_cffi response unexpected for {url}: "
-                    f"status={response.status_code}, len={len(response.content)}"
+        impersonate_profiles = ["chrome", "chrome110", "edge101"]
+        for profile in impersonate_profiles:
+            try:
+                # Use a Session to persist cookies across redirects (helps with CF cookie challenges)
+                session = curl_requests.Session(impersonate=profile)
+                response = session.get(
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    allow_redirects=True,
                 )
-        except Exception as e:
-            logger.warning(f"curl_cffi failed for {url}: {e}")
+                if response.status_code == 200 and len(response.content) > 1000:
+                    html = _decode_content(response.content)
+                    if 'cf-browser-verification' not in html:
+                        logger.debug(f"curl_cffi OK for {url} (profile={profile}, len={len(html)})")
+                        return html
+                    else:
+                        logger.warning(f"curl_cffi got Cloudflare challenge for {url} (profile={profile})")
+                else:
+                    logger.warning(
+                        f"curl_cffi response for {url}: "
+                        f"status={response.status_code}, len={len(response.content)} (profile={profile})"
+                    )
+            except Exception as e:
+                logger.warning(f"curl_cffi failed for {url} (profile={profile}): {e}")
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     # Method 2: httpx fallback
     import httpx

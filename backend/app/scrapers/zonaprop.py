@@ -46,7 +46,7 @@ class ZonapropScraper(BaseScraper):
         return self._fetch_with_selenium()
 
     def _fetch_with_selenium(self) -> str:
-        """Fetch page using Selenium as last resort."""
+        """Fetch page using Selenium, handling Cloudflare JS challenges."""
         try:
             from selenium import webdriver
             from selenium.webdriver.chrome.options import Options
@@ -58,6 +58,8 @@ class ZonapropScraper(BaseScraper):
                 "Neither curl_cffi nor Selenium+Chrome available. "
                 "Install curl_cffi for production: pip install curl_cffi"
             )
+
+        import time
 
         chrome_options = Options()
         chrome_options.add_argument('--headless')
@@ -77,7 +79,21 @@ class ZonapropScraper(BaseScraper):
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
 
-            import time
+            # Wait for Cloudflare JS challenge to resolve
+            cf_markers = [
+                'Just a moment', 'Checking your browser',
+                'cf-browser-verification', '__cf_chl_',
+                'challenge-platform', 'cf-turnstile',
+            ]
+            for i in range(20):
+                page_src = driver.page_source
+                if any(marker in page_src for marker in cf_markers):
+                    logger.debug(f"[zonaprop] Cloudflare challenge active, waiting... ({i+1}s)")
+                    time.sleep(1)
+                else:
+                    logger.info(f"[zonaprop] Cloudflare challenge resolved after {i}s")
+                    break
+
             time.sleep(3)
 
             html = driver.page_source

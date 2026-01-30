@@ -279,7 +279,7 @@ class ZonapropListingScraper(BaseListingScraper):
         return self._fetch_with_selenium(url)
 
     def _fetch_with_selenium(self, url: str) -> str:
-        """Fetch page using Selenium as last resort."""
+        """Fetch page using Selenium, handling Cloudflare JS challenges."""
         import time
         try:
             from selenium.webdriver.common.by import By
@@ -301,11 +301,28 @@ class ZonapropListingScraper(BaseListingScraper):
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
 
-            time.sleep(4)
+            # Wait for Cloudflare JS challenge to resolve (datacenter IPs trigger this)
+            cf_markers = [
+                'Just a moment', 'Checking your browser',
+                'cf-browser-verification', '__cf_chl_',
+                'challenge-platform', 'cf-turnstile',
+            ]
+            for i in range(20):  # up to 20 seconds for CF challenge
+                page_src = driver.page_source
+                if any(marker in page_src for marker in cf_markers):
+                    logger.debug(f"[zonaprop] Cloudflare challenge active, waiting... ({i+1}s)")
+                    time.sleep(1)
+                else:
+                    logger.info(f"[zonaprop] Cloudflare challenge resolved after {i}s")
+                    break
 
+            # Extra wait for page content to render after CF resolves
+            time.sleep(3)
+
+            # Try to wait for property cards
             try:
                 WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, '[data-qa="posting PROPERTY"], .postingCard, [class*="PostingCard"]'))
+                    EC.presence_of_element_located((By.CSS_SELECTOR, '[data-qa="posting PROPERTY"], .postingCard, [class*="PostingCard"], a[href*=".html"]'))
                 )
             except Exception:
                 logger.debug("[zonaprop] No property cards found with expected selectors, continuing anyway")
