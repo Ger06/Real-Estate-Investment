@@ -6,7 +6,7 @@ Uses curl_cffi for Cloudflare bypass, Selenium as last resort.
 import re
 import logging
 from typing import Dict, Any, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 from .listing_base import BaseListingScraper
 from .http_client import fetch_with_browser_fingerprint
@@ -394,7 +394,7 @@ class ZonapropListingScraper(BaseListingScraper):
                 href = link.get('href', '')
                 if href and href not in seen_urls and self._is_property_url(href):
                     seen_urls.add(href)
-                    full_url = urljoin(self.BASE_URL, href)
+                    full_url = self._clean_url(urljoin(self.BASE_URL, href))
                     cards.append({
                         'source_url': full_url,
                         'source_id': self._extract_id_from_url(full_url),
@@ -451,6 +451,16 @@ class ZonapropListingScraper(BaseListingScraper):
 
         return None
 
+    @staticmethod
+    def _clean_url(url: str) -> str:
+        """Strip tracking query params and fragment from property URL.
+
+        Zonaprop appends params like ?n_src=Listado&n_pills=Parrilla&n_pg=1&n_pos=1
+        which cause duplicate-detection mismatches.
+        """
+        parsed = urlparse(url)
+        return urlunparse(parsed._replace(query="", fragment=""))
+
     def _parse_card(self, card) -> Optional[Dict[str, Any]]:
         """Parse a single property card element"""
         data = {
@@ -495,6 +505,7 @@ class ZonapropListingScraper(BaseListingScraper):
             else:
                 data['source_url'] = f"{self.BASE_URL}/{href}"
 
+            data['source_url'] = self._clean_url(data['source_url'])
             data['source_id'] = self._extract_id_from_url(data['source_url'])
 
         if not data['source_url']:

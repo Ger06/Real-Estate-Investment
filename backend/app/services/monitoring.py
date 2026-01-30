@@ -5,6 +5,7 @@ Orchestrates saved searches execution and pending property management
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -235,6 +236,98 @@ class MonitoringService:
 
         return params
 
+    @staticmethod
+    def _clean_source_url(url: str) -> str:
+        """Strip query params and fragment for consistent duplicate detection."""
+        parsed = urlparse(url)
+        return urlunparse(parsed._replace(query="", fragment=""))
+
+    async def _create_property_from_card(
+        self,
+        card: Dict[str, Any],
+        search: SavedSearch,
+        portal: str,
+    ) -> Optional[UUID]:
+        """
+        Create a Property directly from listing-card data + search params.
+
+        No HTTP requests — only DB writes. Fields not available on the card
+        (description, features, contact, full images) are left NULL and can
+        be enriched later via a detail-page scrape.
+
+        Returns:
+            Property UUID if created, None if card has no price.
+        """
+        price = card.get('price')
+        if not price:
+            logger.warning(f"[card→property] Skipping {card.get('source_url')}: no price")
+            return None
+
+        # --- Resolve enums from card + search ---
+        try:
+            source_enum = PropertySource(portal)
+        except ValueError:
+            source_enum = PropertySource.MANUAL
+
+        prop_type_str = (
+            search.property_type.value if search.property_type
+            else "casa"
+        )
+        try:
+            prop_type_enum = PropertyType(prop_type_str)
+        except ValueError:
+            prop_type_enum = PropertyType.CASA
+
+        op_type_str = (
+            search.operation_type.value if search.operation_type
+            else "venta"
+        )
+        try:
+            op_type_enum = OperationType(op_type_str)
+        except ValueError:
+            op_type_enum = OperationType.VENTA
+
+        # Currency: prefer card-level, fallback to search, default USD
+        currency_str = (
+            card.get('currency')
+            or (search.currency.value if search.currency else None)
+            or "USD"
+        ).upper()
+        try:
+            currency_enum = Currency(currency_str)
+        except ValueError:
+            currency_enum = Currency.USD
+
+        # --- Build Property ---
+        new_property = Property(
+            source=source_enum,
+            source_url=card.get('source_url'),
+            source_id=card.get('source_id'),
+            property_type=prop_type_enum,
+            operation_type=op_type_enum,
+            title=card.get('title') or 'Sin título',
+            price=price,
+            currency=currency_enum,
+            city=search.city or 'Buenos Aires',
+            province=search.province or 'Buenos Aires',
+            neighborhood=card.get('location_preview'),
+            status=PropertyStatus.ACTIVE,
+            scraped_at=datetime.utcnow(),
+        )
+
+        # Add thumbnail as primary image if available
+        thumbnail = card.get('thumbnail_url')
+        if thumbnail:
+            new_property.images.append(PropertyImage(
+                url=thumbnail,
+                is_primary=True,
+                order=0,
+            ))
+
+        self.db.add(new_property)
+        await self.db.flush()
+        return new_property.id
+
     async def _process_discovered_property(
         self,
         card: Dict[str, Any],
@@ -253,8 +346,11 @@ class MonitoringService:
         if not source_url:
             return False, 'error'
 
+        # Normalize URL for consistent duplicate detection
+        clean_url = self._clean_source_url(source_url)
+
         # Check 1: Does this URL already exist in Property table?
-        stmt = select(Property).where(Property.source_url == source_url)
+        stmt = select(Property).where(Property.source_url == clean_url)
         result = await self.db.execute(stmt)
         existing_property = result.scalar_one_or_none()
 
@@ -262,12 +358,15 @@ class MonitoringService:
             return False, 'duplicate'
 
         # Check 2: Does this URL already exist in PendingProperty table?
-        stmt = select(PendingProperty).where(PendingProperty.source_url == source_url)
+        stmt = select(PendingProperty).where(PendingProperty.source_url == clean_url)
         result = await self.db.execute(stmt)
         existing_pending = result.scalar_one_or_none()
 
         if existing_pending:
             return False, 'duplicate'
+
+        # Use cleaned URL from here on
+        source_url = clean_url
 
         # It's a new property - add to pending queue
         pending = PendingProperty(
@@ -287,22 +386,22 @@ class MonitoringService:
         # Flush to persist pending before auto-scrape attempt
         await self.db.flush()
 
-        # Auto-scrape if enabled
+        # Auto-create property from card data (no detail-page HTTP requests)
         if search.auto_scrape:
             try:
-                property_id = await self._scrape_and_save_property(pending)
+                property_id = await self._create_property_from_card(
+                    card=card, search=search, portal=portal,
+                )
                 if property_id:
                     pending.status = PendingPropertyStatus.SCRAPED
                     pending.property_id = property_id
                     pending.scraped_at = datetime.utcnow()
                     return True, 'scraped'
                 else:
-                    # _scrape_and_save_property returned None → validation failed
-                    pending.status = PendingPropertyStatus.ERROR
-                    pending.error_message = "Datos insuficientes (posible bloqueo Cloudflare)"
+                    # No price on card — leave as pending for manual review
+                    pending.status = PendingPropertyStatus.PENDING
             except Exception as e:
-                logger.error(f"Auto-scrape failed for {source_url}: {e}")
-                # Rollback the failed scrape, then re-attach pending
+                logger.error(f"Auto-create from card failed for {source_url}: {e}")
                 try:
                     await self.db.rollback()
                 except Exception:
