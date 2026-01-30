@@ -1,20 +1,15 @@
 """
 Zonaprop Listing Scraper
 Scrapes search result pages from www.zonaprop.com.ar to extract property URLs
-Uses Selenium to bypass Cloudflare protection
+Uses curl_cffi for Cloudflare bypass, Selenium as last resort.
 """
 import re
 import logging
-import time
 from typing import Dict, Any, List, Optional
 from urllib.parse import urljoin
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from .listing_base import BaseListingScraper
+from .http_client import fetch_with_browser_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +122,12 @@ class ZonapropListingScraper(BaseListingScraper):
         self.driver = None
 
     def _get_driver(self):
-        """Create and return a configured Chrome WebDriver"""
+        """Create and return a configured Chrome WebDriver (lazy, only when Selenium fallback needed)"""
         if self.driver:
             return self.driver
+
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
 
         chrome_options = Options()
         chrome_options.add_argument('--headless')
@@ -262,24 +260,41 @@ class ZonapropListingScraper(BaseListingScraper):
 
     async def fetch_page(self, url: str) -> str:
         """
-        Fetch page: try httpx first, fall back to Selenium if Cloudflare blocks.
-        This allows the scraper to work on servers without Chrome (e.g. Render).
+        Fetch page with 3-level fallback:
+        1. curl_cffi with Chrome TLS fingerprint (works on Render without Chrome)
+        2. httpx (fallback if curl_cffi not installed)
+        3. Selenium (last resort, only works where Chrome is installed)
         """
-        # Try httpx first (works without Chrome)
+        # Level 1+2: curl_cffi / httpx via base class
         try:
             html = await super().fetch_page(url)
             if len(html) > 5000 and 'cf-browser-verification' not in html:
-                print(f"[DEBUG] [zonaprop] httpx fetch OK, length: {len(html)}")
+                logger.info(f"[zonaprop] fetch_with_browser_fingerprint OK, length: {len(html)}")
                 return html
-            print("[DEBUG] [zonaprop] httpx got Cloudflare challenge, trying Selenium...")
+            logger.warning("[zonaprop] Got Cloudflare challenge, trying Selenium...")
         except Exception as e:
-            print(f"[DEBUG] [zonaprop] httpx failed: {e}, trying Selenium...")
+            logger.warning(f"[zonaprop] HTTP fetch failed: {e}, trying Selenium...")
 
-        # Fall back to Selenium
+        # Level 3: Selenium fallback
+        return self._fetch_with_selenium(url)
+
+    def _fetch_with_selenium(self, url: str) -> str:
+        """Fetch page using Selenium as last resort."""
+        import time
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+        except ImportError:
+            raise RuntimeError(
+                "Neither curl_cffi nor Selenium+Chrome available. "
+                "Install curl_cffi for production: pip install curl_cffi"
+            )
+
         driver = self._get_driver()
 
         try:
-            print(f"[DEBUG] [zonaprop] Selenium loading: {url}")
+            logger.info(f"[zonaprop] Selenium loading: {url}")
             driver.get(url)
 
             WebDriverWait(driver, 15).until(
@@ -293,14 +308,14 @@ class ZonapropListingScraper(BaseListingScraper):
                     EC.presence_of_element_located((By.CSS_SELECTOR, '[data-qa="posting PROPERTY"], .postingCard, [class*="PostingCard"]'))
                 )
             except Exception:
-                print("[DEBUG] [zonaprop] No property cards found with expected selectors, continuing anyway")
+                logger.debug("[zonaprop] No property cards found with expected selectors, continuing anyway")
 
             html = driver.page_source
-            print(f"[DEBUG] [zonaprop] Got HTML via Selenium, length: {len(html)}")
+            logger.info(f"[zonaprop] Got HTML via Selenium, length: {len(html)}")
             return html
 
         except Exception as e:
-            print(f"[DEBUG] [zonaprop] Selenium error: {e}")
+            logger.error(f"[zonaprop] Selenium error: {e}")
             raise
 
     async def scrape_all_pages(self, max_properties: int = 100) -> List[Dict[str, Any]]:

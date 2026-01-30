@@ -1,23 +1,22 @@
 """
 Zonaprop Scraper
 Extracts property data from www.zonaprop.com.ar
-Uses Selenium to bypass Cloudflare protection
+Uses curl_cffi for Cloudflare bypass, Selenium as last resort.
 """
 import re
 import json
+import logging
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse, urljoin
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from .base import BaseScraper
+from .http_client import fetch_with_browser_fingerprint
+
+logger = logging.getLogger(__name__)
 
 
 class ZonapropScraper(BaseScraper):
-    """Scraper for Zonaprop portal using Selenium"""
+    """Scraper for Zonaprop portal. Uses curl_cffi for Cloudflare bypass, Selenium as last resort."""
 
     DOMAIN = "zonaprop.com.ar"
 
@@ -28,20 +27,38 @@ class ZonapropScraper(BaseScraper):
 
     async def fetch_page(self) -> str:
         """
-        Fetch page: try httpx first, fall back to Selenium if Cloudflare blocks.
-        This allows the scraper to work on servers without Chrome (e.g. Render).
+        Fetch page with 3-level fallback:
+        1. curl_cffi with Chrome TLS fingerprint (works on Render without Chrome)
+        2. httpx (fallback if curl_cffi not installed)
+        3. Selenium (last resort, only works where Chrome is installed)
         """
-        # Try httpx first (works without Chrome)
+        # Level 1+2: curl_cffi / httpx via base class
         try:
             html = await super().fetch_page()
-            # Check if Cloudflare blocked us (challenge page is short and has specific markers)
             if len(html) > 5000 and 'cf-browser-verification' not in html:
+                logger.info("[zonaprop] fetch_with_browser_fingerprint OK")
                 return html
-            print("[DEBUG] [zonaprop] httpx got Cloudflare challenge, trying Selenium...")
+            logger.warning("[zonaprop] Got Cloudflare challenge, trying Selenium...")
         except Exception as e:
-            print(f"[DEBUG] [zonaprop] httpx failed: {e}, trying Selenium...")
+            logger.warning(f"[zonaprop] HTTP fetch failed: {e}, trying Selenium...")
 
-        # Fall back to Selenium
+        # Level 3: Selenium (only works locally with Chrome installed)
+        return self._fetch_with_selenium()
+
+    def _fetch_with_selenium(self) -> str:
+        """Fetch page using Selenium as last resort."""
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+        except ImportError:
+            raise RuntimeError(
+                "Neither curl_cffi nor Selenium+Chrome available. "
+                "Install curl_cffi for production: pip install curl_cffi"
+            )
+
         chrome_options = Options()
         chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')

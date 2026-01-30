@@ -1,7 +1,7 @@
 """
 Remax Listing Scraper
 Scrapes search result pages from www.remax.com.ar to extract property URLs
-Uses Selenium for JavaScript-rendered content
+Uses curl_cffi for initial fetch, Selenium as fallback for JavaScript-rendered content.
 
 Location and property type IDs are loaded from the database cache (remax_location_cache
 and remax_property_type_cache tables). If a location is not in the cache, the search
@@ -14,14 +14,10 @@ import asyncio
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, quote
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from .listing_base import BaseListingScraper
+from .http_client import fetch_with_browser_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +133,12 @@ class RemaxListingScraper(BaseListingScraper):
         return self._property_type_cache.get(normalized)
 
     def _get_driver(self):
-        """Create and return a configured Chrome WebDriver"""
+        """Create and return a configured Chrome WebDriver (lazy import)"""
         if self.driver:
             return self.driver
+
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
 
         chrome_options = Options()
         chrome_options.add_argument('--headless')
@@ -277,14 +276,43 @@ class RemaxListingScraper(BaseListingScraper):
         return full_url
 
     async def fetch_page(self, url: str) -> str:
-        """Fetch page using Selenium for JavaScript-rendered content"""
+        """
+        Fetch page with fallback:
+        1. curl_cffi / httpx (may work if data is in initial HTML or embedded JSON)
+        2. Selenium (for JavaScript-rendered content)
+        """
+        # Level 1+2: curl_cffi / httpx - try first, Remax may embed data in JSON
+        try:
+            html = await super().fetch_page(url)
+            # Check if we got meaningful content (Remax embeds JSON data in script tags)
+            if len(html) > 5000 and ('listings' in html or 'property' in html.lower() or '__NEXT_DATA__' in html):
+                logger.info(f"[remax] fetch_with_browser_fingerprint OK, length: {len(html)}")
+                return html
+            logger.info("[remax] HTTP fetch got page but no listing data detected, trying Selenium...")
+        except Exception as e:
+            logger.warning(f"[remax] HTTP fetch failed: {e}, trying Selenium...")
+
+        # Level 3: Selenium fallback for JS-rendered content
+        return self._fetch_with_selenium(url)
+
+    def _fetch_with_selenium(self, url: str) -> str:
+        """Fetch page using Selenium for JavaScript-rendered content."""
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+        except ImportError:
+            raise RuntimeError(
+                "Neither curl_cffi nor Selenium+Chrome available. "
+                "Install curl_cffi for production: pip install curl_cffi"
+            )
+
         driver = self._get_driver()
 
         try:
-            print(f"[DEBUG] [remax] Selenium loading: {url}")
+            logger.info(f"[remax] Selenium loading: {url}")
             driver.get(url)
 
-            # Wait for page to load
             WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
@@ -315,26 +343,17 @@ class RemaxListingScraper(BaseListingScraper):
                     WebDriverWait(driver, 3).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, selector))
                     )
-                    print(f"[DEBUG] [remax] Found elements with selector: {selector}")
+                    logger.debug(f"[remax] Found elements with selector: {selector}")
                     break
                 except Exception:
                     continue
 
             html = driver.page_source
-            print(f"[DEBUG] [remax] Got HTML, length: {len(html)}")
-
-            # Debug: Save HTML to file for inspection
-            try:
-                with open("remax_debug.html", "w", encoding="utf-8") as f:
-                    f.write(html)
-                print("[DEBUG] [remax] Saved HTML to remax_debug.html for inspection")
-            except Exception as e:
-                print(f"[DEBUG] [remax] Could not save debug HTML: {e}")
-
+            logger.info(f"[remax] Got HTML via Selenium, length: {len(html)}")
             return html
 
         except Exception as e:
-            print(f"[DEBUG] [remax] Selenium error: {e}")
+            logger.error(f"[remax] Selenium error: {e}")
             raise
 
     async def scrape_all_pages(self, max_properties: int = 100) -> List[Dict[str, Any]]:
