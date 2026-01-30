@@ -461,6 +461,59 @@ class ZonapropListingScraper(BaseListingScraper):
         parsed = urlparse(url)
         return urlunparse(parsed._replace(query="", fragment=""))
 
+    @staticmethod
+    def _parse_features_text(text: str) -> Dict[str, Any]:
+        """Parse feature snippets commonly found in Zonaprop listing cards.
+
+        Handles text like:
+          "2 amb."  /  "3 ambientes"
+          "45 m² tot."  /  "108 m² tot"
+          "40 m² cub."  /  "96 m² cub"
+          "1 baño"  /  "2 baños"
+          "1 cochera"  /  "1 coch."
+          "3 dormitorios"  /  "2 dorm."
+        """
+        features: Dict[str, Any] = {}
+        t = text.lower()
+
+        # Total area: "108 m² tot" / "108 m2 tot"
+        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*tot', t)
+        if m:
+            features['total_area'] = float(m.group(1).replace(',', '.'))
+
+        # Covered area: "96 m² cub" / "96 m2 cub"
+        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*cub', t)
+        if m:
+            features['covered_area'] = float(m.group(1).replace(',', '.'))
+
+        # If only a bare "X m²" with no qualifier, treat as total_area
+        if 'total_area' not in features and 'covered_area' not in features:
+            m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]', t)
+            if m:
+                features['total_area'] = float(m.group(1).replace(',', '.'))
+
+        # Ambientes → bedrooms
+        m = re.search(r'(\d+)\s*amb', t)
+        if m:
+            features['bedrooms'] = int(m.group(1))
+
+        # Dormitorios (more specific)
+        m = re.search(r'(\d+)\s*dorm', t)
+        if m:
+            features['bedrooms'] = int(m.group(1))
+
+        # Bathrooms
+        m = re.search(r'(\d+)\s*bañ', t)
+        if m:
+            features['bathrooms'] = int(m.group(1))
+
+        # Parking
+        m = re.search(r'(\d+)\s*coch', t)
+        if m:
+            features['parking_spaces'] = int(m.group(1))
+
+        return features
+
     def _parse_card(self, card) -> Optional[Dict[str, Any]]:
         """Parse a single property card element"""
         data = {
@@ -472,6 +525,13 @@ class ZonapropListingScraper(BaseListingScraper):
             'currency': None,
             'thumbnail_url': None,
             'location_preview': None,
+            'description': None,
+            'total_area': None,
+            'covered_area': None,
+            'bedrooms': None,
+            'bathrooms': None,
+            'parking_spaces': None,
+            'address': None,
         }
 
         # Extract URL - look for main link
@@ -582,6 +642,68 @@ class ZonapropListingScraper(BaseListingScraper):
             if loc_elem:
                 data['location_preview'] = loc_elem.get_text(strip=True)[:200]
                 break
+
+        # Extract description / subtitle
+        desc_selectors = [
+            '[data-qa="POSTING_CARD_DESCRIPTION"]',
+            '[class*="Description"]',
+            '[class*="description"]',
+            '[class*="subtitle"]',
+        ]
+        for selector in desc_selectors:
+            desc_elem = card.select_one(selector)
+            if desc_elem:
+                data['description'] = desc_elem.get_text(strip=True)[:1000]
+                break
+
+        # Extract address (separate from location/neighborhood)
+        address_selectors = [
+            '[data-qa="POSTING_CARD_ADDRESS"]',
+            '[class*="Address"]',
+            '[class*="address"]',
+        ]
+        for selector in address_selectors:
+            addr_elem = card.select_one(selector)
+            if addr_elem:
+                data['address'] = addr_elem.get_text(strip=True)[:300]
+                break
+
+        # Extract features (area, rooms, bathrooms, parking)
+        features_selectors = [
+            '[data-qa="POSTING_CARD_FEATURES"]',
+            '[class*="PostingMainFeatures"]',
+            '[class*="postingMainFeatures"]',
+            '[class*="main-features"]',
+            '[class*="CardFeatures"]',
+            '[class*="posting-features"]',
+        ]
+
+        features_text = ""
+        for selector in features_selectors:
+            feat_elem = card.select_one(selector)
+            if feat_elem:
+                features_text = feat_elem.get_text(" ", strip=True)
+                break
+
+        # Fallback: collect text from all small feature spans inside the card
+        if not features_text:
+            feat_spans = card.select('span')
+            snippets = []
+            for span in feat_spans:
+                txt = span.get_text(strip=True)
+                # Feature-like snippets: contain m², amb, baño, dorm, coch
+                if re.search(r'm[²2]|amb|bañ|dorm|coch', txt, re.IGNORECASE):
+                    snippets.append(txt)
+            if snippets:
+                features_text = " ".join(snippets)
+
+        if features_text:
+            parsed = self._parse_features_text(features_text)
+            data['total_area'] = parsed.get('total_area')
+            data['covered_area'] = parsed.get('covered_area')
+            data['bedrooms'] = parsed.get('bedrooms')
+            data['bathrooms'] = parsed.get('bathrooms')
+            data['parking_spaces'] = parsed.get('parking_spaces')
 
         return data
 

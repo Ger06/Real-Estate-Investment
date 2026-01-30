@@ -5,7 +5,7 @@ from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 
 from app.database import get_db
 from app.models.saved_search import SavedSearch
@@ -202,6 +202,11 @@ async def delete_saved_search(
             detail="Búsqueda guardada no encontrada",
         )
 
+    # Explicitly delete pending properties first to avoid async lazy-loading
+    # issues with ORM cascade (MissingGreenlet in async context)
+    await db.execute(
+        delete(PendingProperty).where(PendingProperty.saved_search_id == search_id)
+    )
     await db.delete(search)
     await db.commit()
 

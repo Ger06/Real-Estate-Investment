@@ -298,6 +298,12 @@ class MonitoringService:
         except ValueError:
             currency_enum = Currency.USD
 
+        # --- Compute price_per_sqm ---
+        total_area = card.get('total_area')
+        covered_area = card.get('covered_area')
+        ref_area = total_area or covered_area
+        price_per_sqm = (price / ref_area) if (price and ref_area) else None
+
         # --- Build Property ---
         new_property = Property(
             source=source_enum,
@@ -306,11 +312,19 @@ class MonitoringService:
             property_type=prop_type_enum,
             operation_type=op_type_enum,
             title=card.get('title') or 'Sin título',
+            description=card.get('description'),
             price=price,
             currency=currency_enum,
+            price_per_sqm=price_per_sqm,
+            address=card.get('address'),
             city=search.city or 'Buenos Aires',
             province=search.province or 'Buenos Aires',
             neighborhood=card.get('location_preview'),
+            covered_area=covered_area,
+            total_area=total_area,
+            bedrooms=card.get('bedrooms'),
+            bathrooms=card.get('bathrooms'),
+            parking_spaces=card.get('parking_spaces'),
             status=PropertyStatus.ACTIVE,
             scraped_at=datetime.utcnow(),
         )
