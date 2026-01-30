@@ -22,17 +22,16 @@ except ImportError:
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
+    "Chrome/131.0.0.0 Safari/537.36"
 )
 
 # Realistic browser headers shared across all scrapers
 BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "es-AR,es;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "document",
@@ -41,6 +40,7 @@ BROWSER_HEADERS = {
     "Sec-Fetch-User": "?1",
     "Upgrade-Insecure-Requests": "1",
     "Connection": "keep-alive",
+    "Priority": "u=0, i",
 }
 
 
@@ -81,7 +81,7 @@ async def fetch_with_browser_fingerprint(
     # Method 1: curl_cffi with Chrome TLS fingerprint
     # Try multiple impersonation profiles — different Cloudflare configs block different fingerprints
     if HAS_CURL_CFFI:
-        impersonate_profiles = ["chrome", "chrome110", "edge101"]
+        impersonate_profiles = ["chrome", "chrome124", "chrome110", "edge101"]
         for profile in impersonate_profiles:
             try:
                 # Use a Session to persist cookies across redirects (helps with CF cookie challenges)

@@ -130,7 +130,8 @@ class ZonapropListingScraper(BaseListingScraper):
         from selenium.webdriver.chrome.options import Options
 
         chrome_options = Options()
-        chrome_options.add_argument('--headless')
+        # New headless mode (Chrome 109+): much harder for CF to detect
+        chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument(f'user-agent={self.user_agent}')
@@ -139,8 +140,21 @@ class ZonapropListingScraper(BaseListingScraper):
         chrome_options.add_experimental_option('useAutomationExtension', False)
         chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--lang=es-AR')
 
         self.driver = webdriver.Chrome(options=chrome_options)
+
+        # Override navigator.webdriver flag (CF detection vector)
+        self.driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['es-AR', 'es', 'en']});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                window.chrome = {runtime: {}};
+            """},
+        )
+
         return self.driver
 
     def _close_driver(self):
@@ -294,6 +308,12 @@ class ZonapropListingScraper(BaseListingScraper):
         driver = self._get_driver()
 
         try:
+            # Warm up: visit homepage first to get CF cookies
+            logger.info("[zonaprop] Selenium: warming up with homepage visit")
+            driver.get(self.BASE_URL)
+            time.sleep(4)
+
+            # Now navigate to the search URL (with cookies set)
             logger.info(f"[zonaprop] Selenium loading: {url}")
             driver.get(url)
 
@@ -306,8 +326,10 @@ class ZonapropListingScraper(BaseListingScraper):
                 'Just a moment', 'Checking your browser',
                 'cf-browser-verification', '__cf_chl_',
                 'challenge-platform', 'cf-turnstile',
+                'Attention Required', 'Access denied',
+                'Enable JavaScript and cookies',
             ]
-            for i in range(20):  # up to 20 seconds for CF challenge
+            for i in range(25):  # up to 25 seconds for CF challenge
                 page_src = driver.page_source
                 if any(marker in page_src for marker in cf_markers):
                     logger.debug(f"[zonaprop] Cloudflare challenge active, waiting... ({i+1}s)")
@@ -328,7 +350,18 @@ class ZonapropListingScraper(BaseListingScraper):
                 logger.debug("[zonaprop] No property cards found with expected selectors, continuing anyway")
 
             html = driver.page_source
-            logger.info(f"[zonaprop] Got HTML via Selenium, length: {len(html)}")
+            page_title = driver.title or "(sin título)"
+            logger.info(f"[zonaprop] Got HTML via Selenium, length: {len(html)}, title: {page_title}")
+
+            # Diagnostic: if page is suspiciously small, log what we got
+            if len(html) < 50000:
+                logger.warning(
+                    f"[zonaprop] Page too small ({len(html)} bytes), "
+                    f"likely CF block. Title: '{page_title}', "
+                    f"URL: {driver.current_url}, "
+                    f"HTML snippet: {html[:500]}"
+                )
+
             return html
 
         except Exception as e:
