@@ -5,8 +5,8 @@ All scrapers should inherit from this class
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
-import httpx
 from bs4 import BeautifulSoup
+from .http_client import fetch_with_browser_fingerprint
 
 
 class BaseScraper(ABC):
@@ -46,25 +46,15 @@ class BaseScraper(ABC):
 
     async def fetch_page(self) -> str:
         """
-        Fetch the HTML content of the page with explicit UTF-8 encoding
+        Fetch the HTML content of the page.
+
+        Uses curl_cffi with Chrome TLS fingerprint (bypasses Cloudflare),
+        falling back to httpx.
 
         Returns:
             HTML content as string
         """
-        async with httpx.AsyncClient() as client:
-            headers = {
-                "User-Agent": self.user_agent,
-                "Accept-Charset": "utf-8",
-            }
-            response = await client.get(self.url, headers=headers, timeout=30.0)
-            response.raise_for_status()
-
-            # Explicit UTF-8 decoding with Latin-1 fallback
-            try:
-                return response.content.decode('utf-8')
-            except UnicodeDecodeError:
-                # Fallback for legacy Argentine sites
-                return response.content.decode('latin-1')
+        return await fetch_with_browser_fingerprint(self.url, user_agent=self.user_agent)
 
     def parse_html(self, html: str) -> None:
         """

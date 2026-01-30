@@ -6,8 +6,8 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
-import httpx
 from bs4 import BeautifulSoup
+from .http_client import fetch_with_browser_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,9 @@ class BaseListingScraper(ABC):
         """
         Fetch the HTML content of a page.
 
+        Uses curl_cffi with Chrome TLS fingerprint (bypasses Cloudflare),
+        falling back to httpx.
+
         Args:
             url: URL to fetch
 
@@ -111,36 +114,9 @@ class BaseListingScraper(ABC):
             HTML content as string
 
         Raises:
-            httpx.HTTPError: If request fails
+            Exception: If all fetch methods fail
         """
-        # Headers that look like a real browser
-        headers = {
-            "User-Agent": self.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "es-AR,es;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1",
-            "Connection": "keep-alive",
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=30.0, follow_redirects=True)
-            response.raise_for_status()
-
-            # Explicit UTF-8 decoding with fallback
-            try:
-                return response.content.decode('utf-8')
-            except UnicodeDecodeError:
-                return response.content.decode('latin-1')
+        return await fetch_with_browser_fingerprint(url, user_agent=self.user_agent)
 
     def parse_html(self, html: str) -> None:
         """

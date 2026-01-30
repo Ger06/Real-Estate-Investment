@@ -1,23 +1,22 @@
 """
 MercadoLibre Scraper
 Extracts property data from inmuebles.mercadolibre.com.ar / departamento.mercadolibre.com.ar
-Uses Selenium to handle dynamic content
+Uses curl_cffi for Cloudflare bypass, Selenium as last resort.
 """
 import re
 import json
+import logging
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from .base import BaseScraper
+from .http_client import fetch_with_browser_fingerprint
+
+logger = logging.getLogger(__name__)
 
 
 class MercadoLibreScraper(BaseScraper):
-    """Scraper for MercadoLibre portal using Selenium"""
+    """Scraper for MercadoLibre portal. Uses curl_cffi, Selenium as last resort."""
 
     DOMAINS = ["mercadolibre.com.ar"]
 
@@ -27,7 +26,39 @@ class MercadoLibreScraper(BaseScraper):
         return any(domain in parsed.netloc for domain in self.DOMAINS)
 
     async def fetch_page(self) -> str:
-        """Fetch page using Selenium to handle dynamic content"""
+        """
+        Fetch page with 3-level fallback:
+        1. curl_cffi with Chrome TLS fingerprint (works on Render without Chrome)
+        2. httpx (fallback if curl_cffi not installed)
+        3. Selenium (last resort, only works where Chrome is installed)
+        """
+        # Level 1+2: curl_cffi / httpx via base class
+        try:
+            html = await super().fetch_page()
+            if len(html) > 5000:
+                logger.info(f"[mercadolibre] fetch_with_browser_fingerprint OK, length: {len(html)}")
+                return html
+            logger.warning("[mercadolibre] Response too short, trying Selenium...")
+        except Exception as e:
+            logger.warning(f"[mercadolibre] HTTP fetch failed: {e}, trying Selenium...")
+
+        # Level 3: Selenium fallback
+        return self._fetch_with_selenium()
+
+    def _fetch_with_selenium(self) -> str:
+        """Fetch page using Selenium as last resort."""
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+        except ImportError:
+            raise RuntimeError(
+                "Neither curl_cffi nor Selenium+Chrome available. "
+                "Install curl_cffi for production: pip install curl_cffi"
+            )
+
         chrome_options = Options()
         chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
@@ -42,12 +73,10 @@ class MercadoLibreScraper(BaseScraper):
             driver = webdriver.Chrome(options=chrome_options)
             driver.get(self.url)
 
-            # Wait for page to load
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
 
-            # Additional wait for dynamic content
             import time
             time.sleep(4)
 
