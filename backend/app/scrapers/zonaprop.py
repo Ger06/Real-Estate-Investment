@@ -3,6 +3,7 @@ Zonaprop Scraper
 Extracts property data from www.zonaprop.com.ar
 Uses curl_cffi for Cloudflare bypass, Selenium as last resort.
 """
+import asyncio
 import re
 import json
 import logging
@@ -11,6 +12,7 @@ from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 from .http_client import fetch_with_browser_fingerprint
+from .utils import clean_price as _clean_price
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +29,17 @@ class ZonapropScraper(BaseScraper):
 
     async def fetch_page(self) -> str:
         """
-        Fetch page with 3-level fallback:
-        1. curl_cffi with Chrome TLS fingerprint (works on Render without Chrome)
-        2. httpx (fallback if curl_cffi not installed)
-        3. Selenium (last resort, only works where Chrome is installed)
+        Fetch page with fallback chain:
+        1. curl_cffi with Chrome TLS fingerprint
+        2. FlareSolverr (CF JS challenge solver)
+        3. httpx (plain fallback)
+        4. Selenium (absolute last resort)
         """
-        # Level 1+2: curl_cffi / httpx via base class
+        from .http_client import _is_cf_blocked
+        # Levels 1-3: curl_cffi / FlareSolverr / httpx via base class
         try:
             html = await super().fetch_page()
-            if len(html) > 5000 and 'cf-browser-verification' not in html:
+            if len(html) > 5000 and not _is_cf_blocked(html):
                 logger.info("[zonaprop] fetch_with_browser_fingerprint OK")
                 return html
             logger.warning("[zonaprop] Got Cloudflare challenge, trying Selenium...")
@@ -43,7 +47,7 @@ class ZonapropScraper(BaseScraper):
             logger.warning(f"[zonaprop] HTTP fetch failed: {e}, trying Selenium...")
 
         # Level 3: Selenium (only works locally with Chrome installed)
-        return self._fetch_with_selenium()
+        return await asyncio.to_thread(self._fetch_with_selenium)
 
     def _fetch_with_selenium(self) -> str:
         """Fetch page using Selenium, handling Cloudflare JS challenges."""
@@ -111,6 +115,9 @@ class ZonapropScraper(BaseScraper):
         # Check if page was redirected to a different property
         redirect_warning = self._detect_redirect()
 
+        # Extract address info
+        address_info = self._extract_address_details()
+
         data = {
             "source": "zonaprop",
             "title": self._extract_title(),
@@ -120,7 +127,9 @@ class ZonapropScraper(BaseScraper):
             "property_type": self._extract_property_type(),
             "operation_type": self._extract_operation_type(),
             "location": self._extract_location(),
-            "address": self._extract_address(),
+            "address": address_info.get('full_address', ''),
+            "street": address_info.get('street', ''),
+            "street_number": address_info.get('street_number', ''),
             "images": self._extract_images(),
             "features": self._extract_features(),
             "contact": self._extract_contact(),
@@ -218,14 +227,8 @@ class ZonapropScraper(BaseScraper):
                     price_text = text
                     break
 
-        # Clean price text - Zonaprop format: "USD 239.000"
-        # Remove currency symbols and keep only digits
-        price_clean = re.sub(r'[^\d]', '', price_text)
-
-        try:
-            return float(price_clean) if price_clean else None
-        except ValueError:
-            return None
+        price_amount, _ = _clean_price(price_text)
+        return price_amount
 
     def _extract_currency(self) -> str:
         """Extract currency (USD or ARS)"""
@@ -441,10 +444,19 @@ class ZonapropScraper(BaseScraper):
             "province": province,
         }
 
-    def _extract_address(self) -> str:
-        """Extract street address"""
+    def _extract_address_details(self) -> Dict[str, str]:
+        """
+        Extract address details including street and number.
+        Returns dict with 'full_address', 'street', 'street_number'.
+        """
+        result = {
+            'full_address': '',
+            'street': '',
+            'street_number': '',
+        }
+
         if not self.soup:
-            return ""
+            return result
 
         # Strategy 1: Look for h4 with full address containing street number
         # Format: "Superí 2900, Coghlan, Capital Federal"
@@ -456,7 +468,9 @@ class ZonapropScraper(BaseScraper):
                     # Extract just the street part (before neighborhood)
                     parts = [p.strip() for p in text.split(',')]
                     if parts:
-                        return parts[0]  # Return just "Superí 2900"
+                        result['full_address'] = parts[0]
+                        self._parse_street_number(result, parts[0])
+                        return result
 
         # Strategy 2: Try specific Zonaprop selectors
         selectors = [
@@ -474,7 +488,9 @@ class ZonapropScraper(BaseScraper):
             if elem:
                 addr = elem.get_text(strip=True)
                 if addr and len(addr) > 3:
-                    return addr
+                    result['full_address'] = addr
+                    self._parse_street_number(result, addr)
+                    return result
 
         # Strategy 3: Look in JSON-LD structured data
         for script in self.soup.find_all('script', type='application/ld+json'):
@@ -486,7 +502,9 @@ class ZonapropScraper(BaseScraper):
                         if isinstance(address, dict):
                             street = address.get('streetAddress', '')
                             if street:
-                                return street
+                                result['full_address'] = street
+                                self._parse_street_number(result, street)
+                                return result
             except (json.JSONDecodeError, AttributeError):
                 continue
 
@@ -499,9 +517,29 @@ class ZonapropScraper(BaseScraper):
                 text = elem.get_text(strip=True)
                 if text and len(text) > 3 and len(text) < 200:
                     if any(c.isdigit() for c in text) or any(x in text.lower() for x in ['calle', 'av.', 'avenida', 'pasaje']):
-                        return text
+                        result['full_address'] = text
+                        self._parse_street_number(result, text)
+                        return result
 
-        return ""
+        return result
+
+    def _parse_street_number(self, result: Dict[str, str], address: str) -> None:
+        """Parse street and number from address string."""
+        if not address:
+            return
+
+        # Pattern: "Street Name 1234" or "Av. Street Name 1234"
+        match = re.match(r'^(.+?)\s+(\d+)\s*$', address)
+        if match:
+            result['street'] = match.group(1).strip()
+            result['street_number'] = match.group(2)
+        else:
+            # No number found, entire address is street
+            result['street'] = address
+
+    def _extract_address(self) -> str:
+        """Extract street address (legacy compatibility)"""
+        return self._extract_address_details().get('full_address', '')
 
     def _normalize_image_url(self, img_url: str) -> Optional[str]:
         """Convert relative URLs to absolute, validate format"""

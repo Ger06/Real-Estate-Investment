@@ -16,6 +16,7 @@ from app.schemas.saved_search import (
     SavedSearchResponse,
     SavedSearchListResponse,
     SavedSearchExecuteResponse,
+    ImportCardsRequest,
 )
 # from app.api.deps import get_current_user  # Temporarily disabled
 # from app.models.user import User
@@ -260,6 +261,105 @@ async def execute_saved_search(
         pending=results['pending'],
         errors=results['errors'],
     )
+
+
+@router.post("/{search_id}/import-cards", response_model=SavedSearchExecuteResponse)
+async def import_cards(
+    search_id: UUID,
+    body: ImportCardsRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Import pre-scraped property cards into a saved search.
+
+    Designed for the local scraper workflow: scraping happens on a local machine
+    (residential IP, bypasses Cloudflare) and results are uploaded to the API.
+
+    Deduplication by source_url, same as execute_search.
+    """
+    stmt = select(SavedSearch).where(SavedSearch.id == search_id)
+    result = await db.execute(stmt)
+    search = result.scalar_one_or_none()
+
+    if not search:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Búsqueda guardada no encontrada",
+        )
+
+    service = MonitoringService(db)
+
+    results = {
+        'total_found': len(body.cards),
+        'new_properties': 0,
+        'duplicates': 0,
+        'scraped': 0,
+        'pending': 0,
+        'errors': [],
+    }
+
+    for card_data in body.cards:
+        card = card_data.model_dump()
+        try:
+            async with db.begin_nested():
+                is_new, card_status = await service._process_discovered_property(
+                    card=card,
+                    search=search,
+                    portal=_detect_portal(card_data.source_url, search.portals),
+                )
+
+            if is_new:
+                results['new_properties'] += 1
+                if card_status == 'scraped':
+                    results['scraped'] += 1
+                else:
+                    results['pending'] += 1
+            else:
+                results['duplicates'] += 1
+
+        except Exception as e:
+            # Savepoint rollback is automatic — outer transaction stays valid
+            results['errors'].append({
+                'url': card_data.source_url,
+                'error': str(e),
+            })
+
+    # Update search execution stats
+    from datetime import datetime
+    search.last_executed_at = datetime.utcnow()
+    search.total_executions = (search.total_executions or 0) + 1
+    search.total_properties_found = (search.total_properties_found or 0) + results['new_properties']
+
+    await db.commit()
+
+    return SavedSearchExecuteResponse(
+        success=len(results['errors']) == 0,
+        search_id=search.id,
+        search_name=search.name,
+        total_found=results['total_found'],
+        new_properties=results['new_properties'],
+        duplicates=results['duplicates'],
+        scraped=results['scraped'],
+        pending=results['pending'],
+        errors=results['errors'],
+    )
+
+
+def _detect_portal(source_url: str, portals: list) -> str:
+    """Detect portal from source URL, falling back to first portal in search."""
+    url_lower = source_url.lower()
+    if "zonaprop" in url_lower:
+        return "zonaprop"
+    if "argenprop" in url_lower:
+        return "argenprop"
+    if "remax" in url_lower:
+        return "remax"
+    if "mercadolibre" in url_lower:
+        return "mercadolibre"
+    # Fallback to first portal in the saved search
+    if portals:
+        return portals[0].lower() if hasattr(portals[0], 'lower') else str(portals[0]).lower()
+    return "manual"
 
 
 @router.post("/{search_id}/toggle", response_model=SavedSearchResponse)

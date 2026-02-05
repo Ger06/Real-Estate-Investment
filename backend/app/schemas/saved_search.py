@@ -149,6 +149,29 @@ class SavedSearchListResponse(BaseModel):
     items: List[SavedSearchResponse]
 
 
+class ImportCardData(BaseModel):
+    """Schema for a single scraped property card to import"""
+    source_url: str
+    source_id: Optional[str] = None
+    title: Optional[str] = None
+    price: Optional[float] = None
+    currency: Optional[str] = "USD"
+    thumbnail_url: Optional[str] = None
+    location_preview: Optional[str] = None
+    description: Optional[str] = None
+    total_area: Optional[float] = None
+    covered_area: Optional[float] = None
+    bedrooms: Optional[int] = None
+    bathrooms: Optional[int] = None
+    parking_spaces: Optional[int] = None
+    address: Optional[str] = None
+
+
+class ImportCardsRequest(BaseModel):
+    """Request body for importing scraped cards"""
+    cards: List[ImportCardData]
+
+
 class SavedSearchExecuteResponse(BaseModel):
     """Response after executing a saved search"""
     success: bool

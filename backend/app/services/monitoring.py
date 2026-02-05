@@ -3,6 +3,7 @@ Monitoring Service
 Orchestrates saved searches execution and pending property management
 """
 import logging
+import re
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse
@@ -94,7 +95,7 @@ class MonitoringService:
 
         # Build search params from SavedSearch model
         search_params = self._build_search_params(search)
-        print(f"[DEBUG] Search params: {search_params}")
+        logger.debug(f"Search params: {search_params}")
 
         # Execute search for each portal
         for portal in search.portals:
@@ -120,12 +121,12 @@ class MonitoringService:
 
                 # Debug: show the URL that will be scraped
                 test_url = scraper.build_search_url(page=1)
-                print(f"[DEBUG] Scraping URL (monitoring service): {test_url}", flush=True)
+                logger.debug(f"Scraping URL (monitoring service): {test_url}")
 
                 # Scrape listings
                 logger.info(f"Executing search on {portal} for '{search.name}'")
                 cards = await scraper.scrape_all_pages(max_properties=max_properties)
-                print(f"[DEBUG] Found {len(cards)} cards")
+                logger.debug(f"Found {len(cards)} cards")
 
                 # Special handling for MercadoLibre bot detection
                 if portal_lower == "mercadolibre" and len(cards) == 0:
@@ -146,11 +147,12 @@ class MonitoringService:
                 # Process each discovered property
                 for card in cards:
                     try:
-                        is_new, status = await self._process_discovered_property(
-                            card=card,
-                            search=search,
-                            portal=portal_lower,
-                        )
+                        async with self.db.begin_nested():
+                            is_new, status = await self._process_discovered_property(
+                                card=card,
+                                search=search,
+                                portal=portal_lower,
+                            )
 
                         if is_new:
                             results['new_properties'] += 1
@@ -163,12 +165,7 @@ class MonitoringService:
 
                     except Exception as e:
                         logger.error(f"Error processing card {card.get('source_url')}: {e}")
-                        # Rollback to clear any failed transaction state
-                        # (prevents PendingRollbackError cascade to subsequent cards)
-                        try:
-                            await self.db.rollback()
-                        except Exception:
-                            pass
+                        # Savepoint rollback is automatic — outer transaction stays valid
                         results['errors'].append({
                             'portal': portal,
                             'url': card.get('source_url'),
@@ -304,6 +301,24 @@ class MonitoringService:
         ref_area = total_area or covered_area
         price_per_sqm = (price / ref_area) if (price and ref_area) else None
 
+        # --- Resolve address / neighborhood from card + search ---
+        card_address = card.get('address')
+        card_location = card.get('location_preview')
+
+        # Use neighborhood already parsed by listing scraper (it handles address vs neighborhood logic)
+        # Fallback: parse location_preview if listing scraper didn't set neighborhood
+        neighborhood = card.get('neighborhood')
+        if not neighborhood and card_location:
+            loc_parts = [p.strip() for p in card_location.split(',') if p.strip()]
+            if loc_parts:
+                # If first part looks like an address (has numbers), use second part
+                if re.search(r'\d', loc_parts[0]) and len(loc_parts) >= 2:
+                    neighborhood = loc_parts[1]
+                else:
+                    neighborhood = loc_parts[0]
+        if not neighborhood and search.neighborhoods:
+            neighborhood = search.neighborhoods[0]
+
         # --- Build Property ---
         new_property = Property(
             source=source_enum,
@@ -316,26 +331,31 @@ class MonitoringService:
             price=price,
             currency=currency_enum,
             price_per_sqm=price_per_sqm,
-            address=card.get('address'),
+            address=card_address,
             city=search.city or 'Buenos Aires',
             province=search.province or 'Buenos Aires',
-            neighborhood=card.get('location_preview'),
+            neighborhood=neighborhood,
             covered_area=covered_area,
+            semi_covered_area=card.get('semi_covered_area'),
+            uncovered_area=card.get('uncovered_area'),
             total_area=total_area,
             bedrooms=card.get('bedrooms'),
             bathrooms=card.get('bathrooms'),
             parking_spaces=card.get('parking_spaces'),
+            observations=card.get('observations'),
             status=PropertyStatus.ACTIVE,
             scraped_at=datetime.utcnow(),
         )
 
-        # Add thumbnail as primary image if available
-        thumbnail = card.get('thumbnail_url')
-        if thumbnail:
+        # Add images if available (full list from ng-state JSON, or HTML thumbnails)
+        images = card.get('images', [])
+        if not images and card.get('thumbnail_url'):
+            images = [card['thumbnail_url']]
+        for idx, img_url in enumerate(images[:20]):
             new_property.images.append(PropertyImage(
-                url=thumbnail,
-                is_primary=True,
-                order=0,
+                url=img_url,
+                is_primary=(idx == 0),
+                order=idx,
             ))
 
         self.db.add(new_property)
@@ -474,6 +494,15 @@ class MonitoringService:
 
         # Convert to Property model
         property_data = self._scraped_to_property(scraped_data)
+
+        # Fallback: if neighborhood is empty, try to get from the saved search
+        if not property_data.get('neighborhood') and pending.saved_search_id:
+            search_stmt = select(SavedSearch).where(SavedSearch.id == pending.saved_search_id)
+            search_result = await self.db.execute(search_stmt)
+            saved_search = search_result.scalar_one_or_none()
+            if saved_search and saved_search.neighborhoods:
+                property_data['neighborhood'] = saved_search.neighborhoods[0]
+
         new_property = Property(**property_data)
 
         # Add images
@@ -543,14 +572,18 @@ class MonitoringService:
             'price': scraped_data.get('price', 0),
             'currency': currency_enum,
             'address': scraped_data.get('address'),
+            'street': scraped_data.get('street'),
+            'street_number': scraped_data.get('street_number'),
             'neighborhood': location_data.get('neighborhood'),
-            'city': location_data.get('city', 'Buenos Aires'),
-            'province': location_data.get('province', 'Buenos Aires'),
+            'city': location_data.get('city', 'Capital Federal'),
+            'province': location_data.get('province', 'Capital Federal'),
             'covered_area': features.get('covered_area'),
+            'semi_covered_area': features.get('semi_covered_area'),
             'total_area': features.get('total_area'),
             'bedrooms': features.get('bedrooms'),
             'bathrooms': features.get('bathrooms'),
             'parking_spaces': features.get('parking_spaces'),
+            'observations': features.get('observations'),
             'amenities': {'list': features.get('amenities', [])} if features.get('amenities') else None,
             'real_estate_agency': contact.get('real_estate_agency'),
             'contact_info': contact if any(contact.values()) else None,

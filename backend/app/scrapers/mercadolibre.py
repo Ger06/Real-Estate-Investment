@@ -3,6 +3,7 @@ MercadoLibre Scraper
 Extracts property data from inmuebles.mercadolibre.com.ar / departamento.mercadolibre.com.ar
 Uses curl_cffi for Cloudflare bypass, Selenium as last resort.
 """
+import asyncio
 import re
 import json
 import logging
@@ -11,6 +12,7 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from .base import BaseScraper
 from .http_client import fetch_with_browser_fingerprint
+from .utils import clean_price as _clean_price
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ class MercadoLibreScraper(BaseScraper):
             logger.warning(f"[mercadolibre] HTTP fetch failed: {e}, trying Selenium...")
 
         # Level 3: Selenium fallback
-        return self._fetch_with_selenium()
+        return await asyncio.to_thread(self._fetch_with_selenium)
 
     def _fetch_with_selenium(self) -> str:
         """Fetch page using Selenium as last resort."""
@@ -95,6 +97,9 @@ class MercadoLibreScraper(BaseScraper):
         # Try to extract from JSON-LD first
         json_data = self._extract_json_ld()
 
+        # Extract address details
+        address_info = self._extract_address_details()
+
         data = {
             "source": "mercadolibre",
             "title": self._extract_title(json_data),
@@ -104,7 +109,9 @@ class MercadoLibreScraper(BaseScraper):
             "property_type": self._extract_property_type(),
             "operation_type": self._extract_operation_type(),
             "location": self._extract_location(),
-            "address": self._extract_address(),
+            "address": address_info.get('full_address', ''),
+            "street": address_info.get('street', ''),
+            "street_number": address_info.get('street_number', ''),
             "images": self._extract_images(json_data),
             "features": self._extract_features(),
             "contact": self._extract_contact(),
@@ -184,13 +191,9 @@ class MercadoLibreScraper(BaseScraper):
         price_spans = self.soup.find_all('span', class_=lambda x: x and 'price' in str(x).lower())
         for span in price_spans:
             text = span.get_text(strip=True)
-            # Extract numbers from text like "US$119.000"
-            price_clean = re.sub(r'[^\d]', '', text)
-            if price_clean:
-                try:
-                    return float(price_clean)
-                except ValueError:
-                    continue
+            price_amount, _ = _clean_price(text)
+            if price_amount:
+                return price_amount
 
         return None
 
@@ -297,10 +300,19 @@ class MercadoLibreScraper(BaseScraper):
             "province": province,
         }
 
-    def _extract_address(self) -> str:
-        """Extract street address"""
+    def _extract_address_details(self) -> Dict[str, str]:
+        """
+        Extract address details including street and number.
+        Returns dict with 'full_address', 'street', 'street_number'.
+        """
+        result = {
+            'full_address': '',
+            'street': '',
+            'street_number': '',
+        }
+
         if not self.soup:
-            return ""
+            return result
 
         # Look for full address in location subtitle
         location_elem = self.soup.select_one('.ui-vip-location__subtitle')
@@ -309,46 +321,93 @@ class MercadoLibreScraper(BaseScraper):
             # Extract first part (street address)
             parts = location_text.split(',')
             if parts:
-                return parts[0].strip()
+                address = parts[0].strip()
+                result['full_address'] = address
+                self._parse_street_number(result, address)
 
-        return ""
+        return result
+
+    def _parse_street_number(self, result: Dict[str, str], address: str) -> None:
+        """Parse street and number from address string."""
+        if not address:
+            return
+
+        # Pattern: "Street Name Al 1234" or "Street Name 1234" or "Av. Street 1234"
+        # MercadoLibre often uses "Al" before the number: "Armenia Al 2100"
+        match = re.match(r'^(.+?)\s+(?:Al\s+)?(\d+)\s*$', address, re.IGNORECASE)
+        if match:
+            result['street'] = match.group(1).strip()
+            result['street_number'] = match.group(2)
+        else:
+            # No number found, entire address is street
+            result['street'] = address
+
+    def _extract_address(self) -> str:
+        """Extract street address (legacy compatibility)"""
+        return self._extract_address_details().get('full_address', '')
 
     def _extract_images(self, json_data: Optional[Dict[str, Any]]) -> List[str]:
-        """Extract image URLs"""
+        """Extract image URLs using multiple strategies"""
         images = []
+        seen = set()
 
-        # Try JSON-LD first
+        def _add(url: str) -> None:
+            if url and url not in seen:
+                # Skip non-property images
+                lower = url.lower()
+                if any(skip in lower for skip in ['frontend-assets', 'default', 'exhibitor', 'placeholder', 'logo', '.svg']):
+                    return
+                seen.add(url)
+                # Upgrade ML image resolution: -O (small) -> -F (full size)
+                upgraded = re.sub(r'-[A-Z]\.(\w+)$', r'-F.\1', url)
+                images.append(upgraded)
+
+        # Strategy 1: JSON-LD images
         if json_data and 'image' in json_data:
             img_data = json_data['image']
             if isinstance(img_data, list):
-                images.extend(img_data)
+                for img in img_data:
+                    _add(img)
             elif isinstance(img_data, str):
-                images.append(img_data)
+                _add(img_data)
 
-        # Fallback: extract from HTML
+        # Strategy 2: HTML img tags from gallery/carousel
+        if self.soup:
+            # ML gallery uses figure elements or specific image classes
+            for selector in [
+                'figure img[src*="mlstatic"]',
+                'figure img[data-src*="mlstatic"]',
+                'img[class*="ui-pdp-image"][src*="mlstatic"]',
+                'img[data-zoom*="mlstatic"]',
+                'img[src*="http2.mlstatic.com/D_"]',
+                'img[data-src*="http2.mlstatic.com/D_"]',
+            ]:
+                for img in self.soup.select(selector):
+                    for attr in ['data-zoom', 'data-src', 'src']:
+                        val = img.get(attr, '')
+                        if 'mlstatic' in val:
+                            _add(val)
+                            break
+
+        # Strategy 3: Search all img tags with mlstatic
         if not images and self.soup:
-            img_tags = self.soup.find_all('img', {'src': lambda x: x and 'http2.mlstatic.com' in x})
+            for img in self.soup.find_all('img'):
+                for attr in ['data-src', 'src']:
+                    val = img.get(attr, '')
+                    if 'http2.mlstatic.com' in val and '/D_' in val:
+                        _add(val)
+                        break
 
-            for img in img_tags:
-                src = img.get('src', '')
-                # Filter out small icons/logos
-                if src and 'http2.mlstatic.com' in src:
-                    # Exclude default/placeholder images
-                    if 'default' not in src.lower() and 'exhibitor' not in src.lower():
-                        images.append(src)
+        # Strategy 4: og:image as last resort
+        if not images and self.soup:
+            og = self.soup.find('meta', property='og:image')
+            if og:
+                _add(og.get('content', ''))
 
-        # Remove duplicates
-        seen = set()
-        unique_images = []
-        for img in images:
-            if img not in seen:
-                seen.add(img)
-                unique_images.append(img)
-
-        return unique_images[:20]
+        return images[:20]
 
     def _extract_features(self) -> Dict[str, Any]:
-        """Extract property features"""
+        """Extract property features from specs table and page text"""
         features = {
             "bedrooms": None,
             "bathrooms": None,
@@ -360,32 +419,91 @@ class MercadoLibreScraper(BaseScraper):
         if not self.soup:
             return features
 
-        # MercadoLibre shows features as text
-        text = self.soup.get_text()
+        # Strategy 1: Extract from specs/attributes table rows
+        # MercadoLibre uses table rows with label + value pairs
+        spec_selectors = [
+            'tr.andes-table__row',
+            '[class*="specs"] tr',
+            '[class*="attribute"] tr',
+            'table tr',
+        ]
 
-        # Extract bedrooms/ambientes
-        bed_match = re.search(r'(\d+)\s*dormitorio|(\d+)\s*ambiente', text, re.IGNORECASE)
-        if bed_match:
-            features['bedrooms'] = int(bed_match.group(1) or bed_match.group(2))
+        spec_items = []
+        for selector in spec_selectors:
+            rows = self.soup.select(selector)
+            if rows:
+                for row in rows:
+                    cells = row.find_all(['td', 'th', 'span'])
+                    row_text = row.get_text(' ', strip=True).lower()
+                    spec_items.append(row_text)
+                break
 
-        # Extract bathrooms
-        bath_match = re.search(r'(\d+)\s*baño', text, re.IGNORECASE)
-        if bath_match:
-            features['bathrooms'] = int(bath_match.group(1))
+        # Also check for key-value pairs in list format
+        for selector in ['[class*="specs"] li', '[class*="attribute"] li', '[class*="features"] li']:
+            items = self.soup.select(selector)
+            for item in items:
+                spec_items.append(item.get_text(' ', strip=True).lower())
 
-        # Extract parking
-        parking_match = re.search(r'(\d+)\s*cochera', text, re.IGNORECASE)
-        if parking_match:
-            features['parking_spaces'] = int(parking_match.group(1))
+        # Parse spec items for structured data
+        for item in spec_items:
+            if not features['total_area'] and ('superficie total' in item or 'sup. total' in item):
+                m = re.search(r'(\d+(?:[.,]\d+)?)', item)
+                if m:
+                    features['total_area'] = float(m.group(1).replace(',', '.'))
 
-        # Extract area
-        area_match = re.search(r'(\d+)\s*m²?\s*totales?', text, re.IGNORECASE)
-        if area_match:
-            features['total_area'] = float(area_match.group(1))
+            if not features['covered_area'] and ('superficie cubierta' in item or 'sup. cubierta' in item or 'cubiertos' in item):
+                m = re.search(r'(\d+(?:[.,]\d+)?)', item)
+                if m:
+                    features['covered_area'] = float(m.group(1).replace(',', '.'))
 
-        area_cub_match = re.search(r'(\d+)\s*m²?\s*cubierto', text, re.IGNORECASE)
-        if area_cub_match:
-            features['covered_area'] = float(area_cub_match.group(1))
+            if not features['bedrooms'] and ('dormitorio' in item or 'habitaci' in item):
+                m = re.search(r'(\d+)', item)
+                if m:
+                    features['bedrooms'] = int(m.group(1))
+
+            if not features['bedrooms'] and 'ambiente' in item:
+                m = re.search(r'(\d+)', item)
+                if m:
+                    features['bedrooms'] = int(m.group(1))
+
+            if not features['bathrooms'] and 'baño' in item:
+                m = re.search(r'(\d+)', item)
+                if m:
+                    features['bathrooms'] = int(m.group(1))
+
+            if not features['parking_spaces'] and ('cochera' in item or 'estacionamiento' in item):
+                m = re.search(r'(\d+)', item)
+                if m:
+                    features['parking_spaces'] = int(m.group(1))
+
+        # Strategy 2: Fallback to full page text regex
+        if not any([features['total_area'], features['covered_area'], features['bedrooms']]):
+            text = self.soup.get_text()
+
+            if not features['bedrooms']:
+                bed_match = re.search(r'(\d+)\s*dormitorio|(\d+)\s*ambiente', text, re.IGNORECASE)
+                if bed_match:
+                    features['bedrooms'] = int(bed_match.group(1) or bed_match.group(2))
+
+            if not features['bathrooms']:
+                bath_match = re.search(r'(\d+)\s*baño', text, re.IGNORECASE)
+                if bath_match:
+                    features['bathrooms'] = int(bath_match.group(1))
+
+            if not features['parking_spaces']:
+                parking_match = re.search(r'(\d+)\s*cochera', text, re.IGNORECASE)
+                if parking_match:
+                    features['parking_spaces'] = int(parking_match.group(1))
+
+            if not features['total_area']:
+                area_match = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*totales?', text, re.IGNORECASE)
+                if area_match:
+                    features['total_area'] = float(area_match.group(1).replace(',', '.'))
+
+            if not features['covered_area']:
+                area_cub_match = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*cubiertos?', text, re.IGNORECASE)
+                if area_cub_match:
+                    features['covered_area'] = float(area_cub_match.group(1).replace(',', '.'))
 
         # Extract amenities
         amenities = []

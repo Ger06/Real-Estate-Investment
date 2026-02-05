@@ -9,7 +9,11 @@
       "Bash(python:*)",
       "Bash(pip install:*)",
       "Bash(curl:*)",
-      "Bash(powershell -NoProfile -Command:*)"
+      "Bash(powershell -NoProfile -Command:*)",
+      "Bash(ls:*)",
+      "Bash(dir \"%LOCALAPPDATA%\\\\Google\\\\Chrome\\\\User Data\\\\Default\" /b)",
+      "Bash(tasklist:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }

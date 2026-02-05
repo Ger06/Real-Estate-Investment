@@ -58,12 +58,14 @@ class BaseScraper(ABC):
 
     def parse_html(self, html: str) -> None:
         """
-        Parse HTML content with BeautifulSoup and explicit UTF-8 encoding
+        Parse HTML content with BeautifulSoup.
 
         Args:
-            html: HTML content string
+            html: HTML content string (already decoded Unicode)
         """
-        self.soup = BeautifulSoup(html, 'html.parser', from_encoding='utf-8')
+        # Don't pass from_encoding when html is already a string (Unicode)
+        # from_encoding is only for bytes input
+        self.soup = BeautifulSoup(html, 'html.parser')
 
     async def scrape(self) -> Dict[str, Any]:
         """

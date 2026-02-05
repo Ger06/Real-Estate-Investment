@@ -5,9 +5,12 @@ Data is embedded in JSON scripts
 """
 import re
 import json
+import logging
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse
 from .base import BaseScraper
+
+logger = logging.getLogger(__name__)
 
 
 class RemaxScraper(BaseScraper):
@@ -15,6 +18,8 @@ class RemaxScraper(BaseScraper):
 
     DOMAIN = "remax.com.ar"
     CDN_BASE_URL = "https://d1acdg20u0pmxj.cloudfront.net/"
+    IMAGE_RESOLUTION = "1080xAUTO"
+    IMAGE_EXTENSION = ".jpg"
 
     def validate_url(self) -> bool:
         """Check if URL is from Remax"""
@@ -32,6 +37,15 @@ class RemaxScraper(BaseScraper):
         if not listing_data:
             raise ValueError("Could not find property data in page")
 
+        # Extract address info (returns dict with full_address, street, street_number)
+        address_info = self._extract_address_from_html()
+
+        # Also check JSON for address data
+        json_address = listing_data.get("publicationAddress", "")
+        if not address_info['full_address'] and json_address:
+            address_info['full_address'] = json_address
+            self._parse_street_and_number(address_info)
+
         data = {
             "source": "remax",
             "title": listing_data.get("title", ""),
@@ -41,7 +55,9 @@ class RemaxScraper(BaseScraper):
             "property_type": self._extract_property_type(listing_data),
             "operation_type": self._extract_operation_type(listing_data),
             "location": self._extract_location(listing_data),
-            "address": self._extract_address_from_html(),
+            "address": address_info['full_address'],
+            "street": address_info['street'],
+            "street_number": address_info['street_number'],
             "images": self._extract_images(listing_data),
             "features": self._extract_features(listing_data),
             "contact": self._extract_contact(listing_data),
@@ -56,27 +72,86 @@ class RemaxScraper(BaseScraper):
         if not self.soup:
             return None
 
+        # Priority 0: Angular ng-state script (most reliable for Remax SPA)
+        ng_state = self.soup.find('script', id='ng-state', type='application/json')
+        if ng_state and ng_state.string:
+            try:
+                data = json.loads(ng_state.string)
+                result = self._find_listing_in_json(data)
+                if result:
+                    logger.info("[remax] Found listing data in ng-state script")
+                    return result
+            except (json.JSONDecodeError, KeyError, TypeError):
+                logger.debug("[remax] Failed to parse ng-state script")
+
         # Find all script tags
         for script in self.soup.find_all('script'):
             if not script.string:
                 continue
 
+            script_text = script.string
+
             # Look for the script containing property data
             # Remax embeds data in a specific format
-            if '"id":' in script.string and '"title":' in script.string and '"photos":' in script.string:
+            if '"id":' in script_text and '"title":' in script_text:
                 try:
                     # Parse the JSON
-                    data = json.loads(script.string)
-
-                    # Navigate through the nested structure
-                    # Format: {"random_key": {"b": {"data": {...}}}}
-                    for key in data:
-                        if isinstance(data[key], dict) and 'b' in data[key]:
-                            if 'data' in data[key]['b']:
-                                return data[key]['b']['data']
+                    data = json.loads(script_text)
+                    result = self._find_listing_in_json(data)
+                    if result:
+                        return result
 
                 except (json.JSONDecodeError, KeyError, TypeError):
                     continue
+
+        # Fallback: Try to extract from __NEXT_DATA__ script
+        next_data_script = self.soup.find('script', id='__NEXT_DATA__')
+        if next_data_script and next_data_script.string:
+            try:
+                data = json.loads(next_data_script.string)
+                page_props = data.get('props', {}).get('pageProps', {})
+                if 'listing' in page_props:
+                    return page_props['listing']
+                if 'property' in page_props:
+                    return page_props['property']
+                # Return entire pageProps if it has listing-like data
+                if 'title' in page_props and 'price' in page_props:
+                    return page_props
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
+        return None
+
+    def _find_listing_in_json(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Search for listing data within a parsed JSON structure."""
+        if not isinstance(data, dict):
+            return None
+
+        # Pattern 1: {"random_key": {"b": {"data": {...}}}}
+        for key in data:
+            if isinstance(data[key], dict):
+                if 'b' in data[key] and isinstance(data[key]['b'], dict):
+                    if 'data' in data[key]['b']:
+                        return data[key]['b']['data']
+
+        # Pattern 2: Direct listing data at root
+        if 'title' in data and ('price' in data or 'photos' in data):
+            return data
+
+        # Pattern 3: Nested under 'listing' or 'property'
+        for nested_key in ['listing', 'property', 'data', 'result']:
+            if nested_key in data and isinstance(data[nested_key], dict):
+                nested = data[nested_key]
+                if 'title' in nested:
+                    return nested
+
+        # Pattern 4: Search in nested pageProps (Next.js)
+        if 'props' in data and isinstance(data['props'], dict):
+            page_props = data['props'].get('pageProps', {})
+            if 'listing' in page_props:
+                return page_props['listing']
+            if 'property' in page_props:
+                return page_props['property']
 
         return None
 
@@ -175,6 +250,34 @@ class RemaxScraper(BaseScraper):
         city = ""
         province = "Buenos Aires"
 
+        # Debug: log what we're working with
+        logger.info(f"[remax] _extract_location - title: {listing_data.get('title', '')[:80]}")
+        logger.info(f"[remax] _extract_location - publicationAddress: {listing_data.get('publicationAddress', '')}")
+        logger.info(f"[remax] _extract_location - neighborhood field: {listing_data.get('neighborhood', 'NOT FOUND')}")
+        logger.info(f"[remax] _extract_location - city field: {listing_data.get('city', 'NOT FOUND')}")
+
+        # Known neighborhoods to look for (used for validation and extraction)
+        known_neighborhoods = [
+            'Palermo', 'Belgrano', 'Recoleta', 'Caballito', 'Villa Crespo',
+            'Colegiales', 'Núñez', 'Nunez', 'Almagro', 'San Telmo', 'La Boca',
+            'Villa Urquiza', 'Saavedra', 'Coghlan', 'Chacarita', 'Villa Devoto',
+            'Flores', 'Floresta', 'Boedo', 'Barracas', 'Puerto Madero',
+            'Retiro', 'San Nicolás', 'San Nicolas', 'Monserrat', 'Constitución',
+            'Parque Patricios', 'Parque Chacabuco', 'Villa del Parque',
+            'Villa Pueyrredón', 'Villa Pueyrredon', 'Liniers', 'Mataderos',
+            'Versalles', 'Monte Castro', 'Villa Luro', 'Velez Sarsfield',
+            'Villa Real', 'Villa Santa Rita', 'Agronomía', 'Villa Ortúzar',
+            'Parque Chas', 'Villa General Mitre', 'Paternal', 'Villa Soldati',
+            'Villa Lugano', 'Nueva Pompeya', 'Parque Avellaneda', 'Mataderos',
+        ]
+        known_neighborhoods_lower = [nb.lower() for nb in known_neighborhoods]
+
+        # Generic city/province names that should NOT be treated as neighborhoods
+        generic_locations = [
+            'buenos aires', 'capital federal', 'caba', 'argentina',
+            'gran buenos aires', 'gba', 'provincia de buenos aires',
+        ]
+
         # Priority 1: Check if there's a location/neighborhood object in JSON
         if 'neighborhood' in listing_data:
             neighborhood_obj = listing_data['neighborhood']
@@ -197,6 +300,16 @@ class RemaxScraper(BaseScraper):
             elif isinstance(prov_obj, str):
                 province = prov_obj
 
+        # Also check for nested 'location' object (some Remax JSON structures)
+        if 'location' in listing_data and isinstance(listing_data['location'], dict):
+            loc = listing_data['location']
+            if not neighborhood and loc.get('neighborhood'):
+                neighborhood = loc['neighborhood']
+            if not city and loc.get('city'):
+                city = loc['city']
+            if loc.get('state') or loc.get('province'):
+                province = loc.get('state') or loc.get('province') or province
+
         # Priority 2: Parse from publicationAddress
         # Remax format: "Street 1234, Neighborhood, City" or "Neighborhood, City"
         if not neighborhood or not city:
@@ -205,52 +318,70 @@ class RemaxScraper(BaseScraper):
                 parts = [p.strip() for p in address.split(',') if p.strip()]
 
                 if len(parts) == 1:
-                    # Just one part - could be neighborhood or city
-                    if not city:
-                        city = parts[0]
+                    part_lower = parts[0].lower()
+                    # Only set as city if it looks like a city, not a neighborhood
+                    if part_lower in generic_locations:
+                        if not city:
+                            city = parts[0]
+                    else:
+                        # Could be a neighborhood
+                        if not neighborhood and part_lower not in generic_locations:
+                            neighborhood = parts[0]
                 elif len(parts) == 2:
                     # "Neighborhood, City" or "Street, City"
-                    if not neighborhood:
+                    part0_lower = parts[0].lower()
+                    part1_lower = parts[1].lower()
+
+                    # If first part is generic (Buenos Aires), don't use as neighborhood
+                    if part0_lower not in generic_locations and not neighborhood:
                         neighborhood = parts[0]
                     if not city:
                         city = parts[1]
                 elif len(parts) >= 3:
                     # "Street, Neighborhood, City"
-                    if not neighborhood:
+                    part_m2_lower = parts[-2].lower()
+                    if part_m2_lower not in generic_locations and not neighborhood:
                         neighborhood = parts[-2]  # Second to last
                     if not city:
                         city = parts[-1]  # Last
 
-        # Priority 3: Extract from title
+        # Priority 3: ALWAYS extract from title - this is the most reliable for Remax
+        # Even if we have a neighborhood, check if it's generic and override with title
         title = listing_data.get("title", "")
+        title_lower = title.lower()
 
-        # Known neighborhoods to look for
-        known_neighborhoods = [
-            'Palermo', 'Belgrano', 'Recoleta', 'Caballito', 'Villa Crespo',
-            'Colegiales', 'Núñez', 'Nunez', 'Almagro', 'San Telmo', 'La Boca',
-            'Villa Urquiza', 'Saavedra', 'Coghlan', 'Chacarita', 'Villa Devoto',
-            'Flores', 'Floresta', 'Boedo', 'Barracas', 'Puerto Madero',
-            'Retiro', 'San Nicolás', 'San Nicolas', 'Monserrat', 'Constitución',
-            'Parque Patricios', 'Parque Chacabuco', 'Villa del Parque',
-            'Villa Pueyrredón', 'Villa Pueyrredon', 'Liniers', 'Mataderos'
-        ]
+        # Check if current neighborhood is generic (like "Buenos Aires")
+        neighborhood_is_generic = neighborhood.lower() in generic_locations if neighborhood else True
 
-        if not neighborhood:
+        # Extract neighborhood from title if we don't have one or current one is generic
+        if neighborhood_is_generic:
             for nb in known_neighborhoods:
-                if nb.lower() in title.lower():
+                if nb.lower() in title_lower:
                     neighborhood = nb
                     break
 
         # Extract city from title
-        if not city:
-            if "Capital Federal" in title or "CABA" in title:
+        if not city or city.lower() in generic_locations:
+            if "capital federal" in title_lower or "caba" in title_lower:
                 city = "Capital Federal"
 
-        # Defaults
+        # Determine province based on city
+        if city:
+            city_lower = city.lower()
+            if city_lower in ['capital federal', 'caba', 'ciudad de buenos aires', 'ciudad autónoma de buenos aires']:
+                province = "Capital Federal"
+                city = "Capital Federal"  # Normalize
+            elif city_lower == 'buenos aires':
+                # "Buenos Aires" as city usually means Capital Federal
+                city = "Capital Federal"
+                province = "Capital Federal"
+
+        # Final defaults
         if not city:
-            city = "Buenos Aires"
-        if "capital federal" in city.lower() or "caba" in city.lower():
-            province = "Capital Federal"
+            city = "Capital Federal"  # Default to Capital Federal for Remax (most listings are there)
+
+        # Debug: log the final result
+        logger.info(f"[remax] _extract_location - RESULT: neighborhood='{neighborhood}', city='{city}', province='{province}'")
 
         return {
             "neighborhood": neighborhood,
@@ -258,39 +389,203 @@ class RemaxScraper(BaseScraper):
             "province": province,
         }
 
-    def _extract_address_from_html(self) -> str:
-        """Extract address from HTML spans"""
+    def _extract_address_from_html(self) -> Dict[str, str]:
+        """
+        Extract address from HTML.
+        Returns dict with 'full_address', 'street', 'street_number'.
+        """
+        result = {
+            'full_address': '',
+            'street': '',
+            'street_number': '',
+        }
+
         if not self.soup:
-            return ""
+            return result
 
         # Look for address in title or h1
         title_elem = self.soup.find('title')
         if title_elem:
             title_text = title_elem.get_text()
             # Extract address from title like: "Departamento en venta 2 ambientes en Santa Rosa 5100, Palermo, Capital Federal"
+            # Or: "VENTA PH 4 AMBIENTES COGHLAN QUINCHO Y TERRAZA" - no address in title
             match = re.search(r'en ([^,]+,\s*[^,]+,\s*[^-]+)', title_text)
             if match:
-                return match.group(1).strip()
+                result['full_address'] = match.group(1).strip()
 
-        return ""
+        # Try to find address in specific HTML elements
+        address_selectors = [
+            '.property-address',
+            '.address',
+            '[class*="address"]',
+            '[class*="ubicacion"]',
+            '[class*="location"]',
+            'span[itemprop="streetAddress"]',
+        ]
+
+        for selector in address_selectors:
+            elem = self.soup.select_one(selector)
+            if elem:
+                addr_text = elem.get_text(strip=True)
+                if addr_text and len(addr_text) > 5:
+                    result['full_address'] = addr_text
+                    break
+
+        # Try to extract street and number from full address
+        if result['full_address']:
+            self._parse_street_and_number(result)
+
+        return result
+
+    def _parse_street_and_number(self, result: Dict[str, str]) -> None:
+        """Parse street name and number from full address string."""
+        full_addr = result['full_address']
+        if not full_addr:
+            return
+
+        # Take first part before comma (usually street + number)
+        first_part = full_addr.split(',')[0].strip()
+
+        # Pattern: "Street Name 1234" or "Av. Street Name 1234"
+        # Match: everything before a number at the end
+        match = re.match(r'^(.+?)\s+(\d+)\s*$', first_part)
+        if match:
+            result['street'] = match.group(1).strip()
+            result['street_number'] = match.group(2)
+        else:
+            # No number found, entire first part is street
+            result['street'] = first_part
+
+    def _build_image_url(self, raw_path: str) -> Optional[str]:
+        """
+        Build a proper CDN image URL from a raw path.
+
+        Remax rawValue format: "listings/{LISTING_UUID}/{IMAGE_UUID}"
+        CDN URL format: "https://d1acdg20u0pmxj.cloudfront.net/listings/{LISTING_UUID}/{RESOLUTION}/{IMAGE_UUID}.jpg"
+
+        Supported CDN resolutions: 1080xAUTO (.jpg), 360x200 (.jpg/.webp).
+        Other resolutions (1024x1024, etc.) return 403.
+        """
+        if not raw_path:
+            return None
+
+        # Already a full URL
+        if raw_path.startswith("http"):
+            return raw_path
+
+        # Strip leading slash
+        raw_path = raw_path.lstrip("/")
+
+        # Expected: "listings/{LISTING_UUID}/{IMAGE_UUID}"
+        parts = raw_path.split("/")
+        if len(parts) == 3 and parts[0] == "listings":
+            listing_uuid = parts[1]
+            image_uuid = parts[2]
+            # Remove any existing extension
+            image_uuid = re.sub(r'\.\w+$', '', image_uuid)
+            url = (
+                f"{self.CDN_BASE_URL}listings/{listing_uuid}/"
+                f"{self.IMAGE_RESOLUTION}/{image_uuid}{self.IMAGE_EXTENSION}"
+            )
+            return url
+
+        # If it already has a resolution segment (4 parts): listings/UUID/RES/UUID.ext
+        if len(parts) == 4 and parts[0] == "listings":
+            # Upgrade resolution if needed
+            listing_uuid = parts[1]
+            image_uuid = re.sub(r'\.\w+$', '', parts[3])
+            url = (
+                f"{self.CDN_BASE_URL}listings/{listing_uuid}/"
+                f"{self.IMAGE_RESOLUTION}/{image_uuid}{self.IMAGE_EXTENSION}"
+            )
+            return url
+
+        # Unknown format - use as-is with CDN base
+        return f"{self.CDN_BASE_URL}{raw_path}"
+
+    def _is_valid_property_image(self, url: str) -> bool:
+        """Filter out non-property images (SVGs, icons, logos, agent photos)."""
+        url_lower = url.lower()
+        exclude_patterns = [
+            '.svg', '/icons/', '/logo', '/agent/', '/agents/',
+            '/avatar/', '/favicon', '/brand/', '/sprite',
+            'placeholder', 'default-photo', '/assets/',
+        ]
+        return not any(pattern in url_lower for pattern in exclude_patterns)
 
     def _extract_images(self, listing_data: Dict[str, Any]) -> List[str]:
-        """Extract image URLs"""
-        images = []
+        """
+        Extract image URLs using multiple strategies.
 
+        Strategy 1: JSON photos array (rawValue, then value fallback)
+        Strategy 2: HTML <img> tags filtered by CDN domain
+        Strategy 3: og:image meta tag as last resort
+        """
+        images: List[str] = []
+        seen: set = set()
+
+        def _add_image(url: str) -> None:
+            if url and url not in seen and self._is_valid_property_image(url):
+                seen.add(url)
+                images.append(url)
+
+        # Strategy 1: JSON photos array
         photos = listing_data.get("photos", [])
+        if photos:
+            for photo in photos:
+                if isinstance(photo, dict):
+                    # Try rawValue first (actual Remax key)
+                    raw_path = photo.get("rawValue", "") or photo.get("value", "")
+                    if raw_path:
+                        full_url = self._build_image_url(raw_path)
+                        if full_url:
+                            _add_image(full_url)
+                elif isinstance(photo, str) and photo:
+                    full_url = self._build_image_url(photo)
+                    if full_url:
+                        _add_image(full_url)
 
-        for photo in photos:
-            if isinstance(photo, dict):
-                # Photos are stored as relative paths
-                photo_path = photo.get("value", "")
+            if images:
+                logger.info(f"[remax] Strategy 1 (JSON photos): found {len(images)} images")
 
-                if photo_path:
-                    # Convert to absolute URL using CDN
-                    full_url = f"{self.CDN_BASE_URL}{photo_path}"
-                    images.append(full_url)
+        # Strategy 2: HTML <img> tags with CDN domain
+        if not images and self.soup:
+            cdn_domain = "d1acdg20u0pmxj.cloudfront.net"
+            for img in self.soup.find_all("img"):
+                src = img.get("src", "") or img.get("data-src", "")
+                if cdn_domain in src and "/listings/" in src:
+                    # Upgrade resolution in URL if present
+                    upgraded = self._upgrade_image_resolution(src)
+                    _add_image(upgraded)
 
-        return images[:20]  # Limit to 20 images
+            if images:
+                logger.info(f"[remax] Strategy 2 (HTML img tags): found {len(images)} images")
+
+        # Strategy 3: og:image meta tag
+        if not images and self.soup:
+            og_image = self.soup.find("meta", property="og:image")
+            if og_image:
+                content = og_image.get("content", "")
+                if content:
+                    _add_image(content)
+                    logger.info("[remax] Strategy 3 (og:image): found 1 image")
+
+        if not images:
+            logger.warning("[remax] No images found with any strategy")
+
+        return images[:20]
+
+    def _upgrade_image_resolution(self, url: str) -> str:
+        """
+        Upgrade an existing CDN image URL to the configured resolution.
+        Replaces resolution segments like '312x312' or '640x480' with IMAGE_RESOLUTION.
+        """
+        return re.sub(
+            r'/\d+x\d+/',
+            f'/{self.IMAGE_RESOLUTION}/',
+            url,
+            count=1,
+        )
 
     def _extract_features(self, listing_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract property features"""

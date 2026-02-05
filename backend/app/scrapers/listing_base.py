@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 from bs4 import BeautifulSoup
 from .http_client import fetch_with_browser_fingerprint
+from .utils import clean_price as _shared_clean_price
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +124,11 @@ class BaseListingScraper(ABC):
         Parse HTML content with BeautifulSoup.
 
         Args:
-            html: HTML content string
+            html: HTML content string (already decoded Unicode)
         """
-        self.soup = BeautifulSoup(html, 'html.parser', from_encoding='utf-8')
+        # Don't pass from_encoding when html is already a string (Unicode)
+        # from_encoding is only for bytes input
+        self.soup = BeautifulSoup(html, 'html.parser')
 
     async def scrape_page(self, page: int = 1) -> List[Dict[str, Any]]:
         """
@@ -138,17 +141,17 @@ class BaseListingScraper(ABC):
             List of property card data
         """
         url = self.build_search_url(page)
-        print(f"[DEBUG] [{self.PORTAL_NAME}] Scraping page {page}: {url}")
+        logger.debug(f"[{self.PORTAL_NAME}] Scraping page {page}: {url}")
 
         try:
             html = await self.fetch_page(url)
-            print(f"[DEBUG] [{self.PORTAL_NAME}] Fetched HTML, length: {len(html)}")
+            logger.debug(f"[{self.PORTAL_NAME}] Fetched HTML, length: {len(html)}")
             self.parse_html(html)
             cards = self.extract_property_cards()
-            print(f"[DEBUG] [{self.PORTAL_NAME}] Found {len(cards)} properties on page {page}")
+            logger.debug(f"[{self.PORTAL_NAME}] Found {len(cards)} properties on page {page}")
             return cards
         except Exception as e:
-            print(f"[DEBUG] [{self.PORTAL_NAME}] Error scraping page {page}: {str(e)}")
+            logger.debug(f"[{self.PORTAL_NAME}] Error scraping page {page}: {str(e)}")
             raise
 
     async def scrape_all_pages(self, max_properties: int = 100) -> List[Dict[str, Any]]:
@@ -223,9 +226,65 @@ class BaseListingScraper(ABC):
         elements = self.soup.select(selector)
         return [elem.get(attr, "") for elem in elements if elem.get(attr)]
 
+    @staticmethod
+    def parse_features_text(text: str) -> Dict[str, Any]:
+        """Parse feature snippets commonly found in Argentine real estate listing cards.
+
+        Handles text like:
+          "2 amb."  /  "3 ambientes"
+          "45 m² tot."  /  "108 m² tot"
+          "40 m² cub."  /  "96 m² cub"
+          "1 baño"  /  "2 baños"
+          "1 cochera"  /  "1 coch."
+          "3 dormitorios"  /  "2 dorm."
+        """
+        import re
+        features: Dict[str, Any] = {}
+        t = text.lower()
+
+        # Total area: "108 m² tot" / "108 m2 tot"
+        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*tot', t)
+        if m:
+            features['total_area'] = float(m.group(1).replace(',', '.'))
+
+        # Covered area: "96 m² cub" / "96 m2 cub"
+        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*cub', t)
+        if m:
+            features['covered_area'] = float(m.group(1).replace(',', '.'))
+
+        # If only a bare "X m²" with no qualifier, treat as total_area
+        if 'total_area' not in features and 'covered_area' not in features:
+            m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]', t)
+            if m:
+                features['total_area'] = float(m.group(1).replace(',', '.'))
+
+        # Ambientes → bedrooms
+        m = re.search(r'(\d+)\s*amb', t)
+        if m:
+            features['bedrooms'] = int(m.group(1))
+
+        # Dormitorios (more specific)
+        m = re.search(r'(\d+)\s*dorm', t)
+        if m:
+            features['bedrooms'] = int(m.group(1))
+
+        # Bathrooms
+        m = re.search(r'(\d+)\s*bañ', t)
+        if m:
+            features['bathrooms'] = int(m.group(1))
+
+        # Parking
+        m = re.search(r'(\d+)\s*coch', t)
+        if m:
+            features['parking_spaces'] = int(m.group(1))
+
+        return features
+
     def clean_price(self, price_text: str) -> tuple[Optional[float], Optional[str]]:
         """
         Parse price text and extract amount and currency.
+
+        Delegates to shared utility in utils.py.
 
         Args:
             price_text: Price string like "USD 250.000" or "$ 250.000"
@@ -233,57 +292,4 @@ class BaseListingScraper(ABC):
         Returns:
             Tuple of (price_amount, currency) or (None, None) if parsing fails
         """
-        import re
-
-        if not price_text:
-            return None, None
-
-        # Remove common separators and whitespace
-        price_text = price_text.strip().upper()
-
-        # Detect currency
-        currency = None
-        if "USD" in price_text or "U$S" in price_text or "US$" in price_text:
-            currency = "USD"
-        elif "ARS" in price_text or "AR$" in price_text or "$" in price_text:
-            currency = "ARS"
-
-        # Extract numbers
-        numbers = re.findall(r'[\d.,]+', price_text)
-        if not numbers:
-            return None, currency
-
-        # Take the first number and clean it
-        price_str = numbers[0]
-        # Handle different number formats (1.000.000 or 1,000,000)
-        if price_str.count('.') > 1:
-            # Format: 1.000.000 (periods as thousands separator)
-            price_str = price_str.replace('.', '')
-        elif price_str.count(',') > 1:
-            # Format: 1,000,000 (commas as thousands separator)
-            price_str = price_str.replace(',', '')
-        elif ',' in price_str and '.' in price_str:
-            # Format: 1,000.00 or 1.000,00
-            if price_str.index(',') < price_str.index('.'):
-                # 1,000.00 format
-                price_str = price_str.replace(',', '')
-            else:
-                # 1.000,00 format
-                price_str = price_str.replace('.', '').replace(',', '.')
-        elif ',' in price_str:
-            # Could be 1,000 or 1,00 - assume thousands separator
-            price_str = price_str.replace(',', '')
-        elif '.' in price_str:
-            # Could be 1.000 or 1.00 - check position
-            parts = price_str.split('.')
-            if len(parts[-1]) == 2:
-                # Decimal: 1.00
-                pass
-            else:
-                # Thousands: 1.000
-                price_str = price_str.replace('.', '')
-
-        try:
-            return float(price_str), currency
-        except ValueError:
-            return None, currency
+        return _shared_clean_price(price_text)

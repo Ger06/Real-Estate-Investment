@@ -3,6 +3,7 @@ Zonaprop Listing Scraper
 Scrapes search result pages from www.zonaprop.com.ar to extract property URLs
 Uses curl_cffi for Cloudflare bypass, Selenium as last resort.
 """
+import asyncio
 import re
 import logging
 from typing import Dict, Any, List, Optional
@@ -121,17 +122,54 @@ class ZonapropListingScraper(BaseListingScraper):
         super().__init__(search_params, user_agent)
         self.driver = None
 
-    def _get_driver(self):
-        """Create and return a configured Chrome WebDriver (lazy, only when Selenium fallback needed)"""
+    def _get_driver(self, headless: bool = False):
+        """Create and return a configured Chrome WebDriver.
+
+        Uses undetected-chromedriver if available to bypass Cloudflare.
+        Non-headless mode by default for better Cloudflare bypass.
+        """
         if self.driver:
             return self.driver
 
+        # Try undetected-chromedriver first (better for Cloudflare)
+        try:
+            import undetected_chromedriver as uc
+
+            # Detect installed Chrome version to avoid driver mismatch
+            version_main = None
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon")
+                chrome_version, _ = winreg.QueryValueEx(key, "version")
+                winreg.CloseKey(key)
+                version_main = int(chrome_version.split('.')[0])
+                print(f"[DEBUG] [zonaprop] Detected Chrome v{version_main}")
+            except Exception as e:
+                print(f"[DEBUG] [zonaprop] Could not detect Chrome version: {e}")
+
+            options = uc.ChromeOptions()
+            if headless:
+                options.add_argument('--headless=new')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--window-size=1920,1080')
+
+            self.driver = uc.Chrome(options=options, version_main=version_main)
+            print("[DEBUG] [zonaprop] Using undetected-chromedriver")
+            return self.driver
+
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[DEBUG] [zonaprop] undetected-chromedriver failed: {e}, falling back to selenium")
+
+        # Fallback to regular selenium
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
 
         chrome_options = Options()
-        # New headless mode (Chrome 109+): much harder for CF to detect
-        chrome_options.add_argument('--headless=new')
+        if headless:
+            chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument(f'user-agent={self.user_agent}')
@@ -155,6 +193,7 @@ class ZonapropListingScraper(BaseListingScraper):
             """},
         )
 
+        print("[DEBUG] [zonaprop] Using regular selenium (headless)" if headless else "[DEBUG] [zonaprop] Using regular selenium")
         return self.driver
 
     def _close_driver(self):
@@ -257,8 +296,11 @@ class ZonapropListingScraper(BaseListingScraper):
         min_bedrooms = params.get("min_bedrooms")
         max_bedrooms = params.get("max_bedrooms")
 
-        if min_bedrooms and max_bedrooms and min_bedrooms == max_bedrooms:
-            filter_segments.append(f"{int(min_bedrooms)}-ambientes")
+        if min_bedrooms and max_bedrooms:
+            if min_bedrooms == max_bedrooms:
+                filter_segments.append(f"{int(min_bedrooms)}-ambientes")
+            else:
+                filter_segments.append(f"{int(min_bedrooms)}-a-{int(max_bedrooms)}-ambientes")
         elif min_bedrooms:
             filter_segments.append(f"{int(min_bedrooms)}-ambientes-o-mas")
 
@@ -274,15 +316,17 @@ class ZonapropListingScraper(BaseListingScraper):
 
     async def fetch_page(self, url: str) -> str:
         """
-        Fetch page with 3-level fallback:
-        1. curl_cffi with Chrome TLS fingerprint (works on Render without Chrome)
-        2. httpx (fallback if curl_cffi not installed)
-        3. Selenium (last resort, only works where Chrome is installed)
+        Fetch page with fallback chain:
+        1. curl_cffi with Chrome TLS fingerprint
+        2. FlareSolverr (CF JS challenge solver)
+        3. httpx (plain fallback)
+        4. Selenium (absolute last resort)
         """
-        # Level 1+2: curl_cffi / httpx via base class
+        from .http_client import _is_cf_blocked
+        # Levels 1-3: curl_cffi / FlareSolverr / httpx via base class
         try:
             html = await super().fetch_page(url)
-            if len(html) > 5000 and 'cf-browser-verification' not in html:
+            if len(html) > 5000 and not _is_cf_blocked(html):
                 logger.info(f"[zonaprop] fetch_with_browser_fingerprint OK, length: {len(html)}")
                 return html
             logger.warning("[zonaprop] Got Cloudflare challenge, trying Selenium...")
@@ -290,7 +334,7 @@ class ZonapropListingScraper(BaseListingScraper):
             logger.warning(f"[zonaprop] HTTP fetch failed: {e}, trying Selenium...")
 
         # Level 3: Selenium fallback
-        return self._fetch_with_selenium(url)
+        return await asyncio.to_thread(self._fetch_with_selenium, url)
 
     def _fetch_with_selenium(self, url: str) -> str:
         """Fetch page using Selenium, handling Cloudflare JS challenges."""
@@ -370,11 +414,17 @@ class ZonapropListingScraper(BaseListingScraper):
 
     async def scrape_all_pages(self, max_properties: int = 100) -> List[Dict[str, Any]]:
         """
-        Scrape all pages using Selenium.
+        Scrape all pages using Selenium, then enrich with detail page data.
         Override to ensure driver is closed after scraping.
         """
         try:
-            return await super().scrape_all_pages(max_properties)
+            cards = await super().scrape_all_pages(max_properties)
+            # Enrich cards with images and features from detail pages
+            if cards:
+                # Create driver if not already created (curl_cffi may have been used for search)
+                self._get_driver()
+                cards = self._enrich_cards_from_detail(cards)
+            return cards
         finally:
             self._close_driver()
 
@@ -411,16 +461,16 @@ class ZonapropListingScraper(BaseListingScraper):
             card_elements = self.soup.select(selector)
             if card_elements:
                 logger.debug(f"Found {len(card_elements)} cards with selector: {selector}")
-                print(f"[DEBUG] [zonaprop] Found {len(card_elements)} cards with selector: {selector}")
+                logger.debug(f"[zonaprop] Found {len(card_elements)} cards with selector: {selector}")
                 break
 
         if not card_elements:
             # Fallback: look for any links to property pages
-            print("[DEBUG] [zonaprop] No cards found with standard selectors, trying fallback...")
+            logger.debug("[zonaprop] No cards found with standard selectors, trying fallback...")
 
             # Zonaprop property URLs contain long numeric IDs
             property_links = self.soup.select('a[href*=".html"]')
-            print(f"[DEBUG] [zonaprop] Found {len(property_links)} .html links")
+            logger.debug(f"[zonaprop] Found {len(property_links)} .html links")
 
             seen_urls = set()
             for link in property_links:
@@ -439,7 +489,7 @@ class ZonapropListingScraper(BaseListingScraper):
                         'location_preview': None,
                     })
 
-            print(f"[DEBUG] [zonaprop] Fallback found {len(cards)} property URLs")
+            logger.debug(f"[zonaprop] Fallback found {len(cards)} property URLs")
             return cards
 
         # Process each card
@@ -493,59 +543,6 @@ class ZonapropListingScraper(BaseListingScraper):
         """
         parsed = urlparse(url)
         return urlunparse(parsed._replace(query="", fragment=""))
-
-    @staticmethod
-    def _parse_features_text(text: str) -> Dict[str, Any]:
-        """Parse feature snippets commonly found in Zonaprop listing cards.
-
-        Handles text like:
-          "2 amb."  /  "3 ambientes"
-          "45 m² tot."  /  "108 m² tot"
-          "40 m² cub."  /  "96 m² cub"
-          "1 baño"  /  "2 baños"
-          "1 cochera"  /  "1 coch."
-          "3 dormitorios"  /  "2 dorm."
-        """
-        features: Dict[str, Any] = {}
-        t = text.lower()
-
-        # Total area: "108 m² tot" / "108 m2 tot"
-        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*tot', t)
-        if m:
-            features['total_area'] = float(m.group(1).replace(',', '.'))
-
-        # Covered area: "96 m² cub" / "96 m2 cub"
-        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*cub', t)
-        if m:
-            features['covered_area'] = float(m.group(1).replace(',', '.'))
-
-        # If only a bare "X m²" with no qualifier, treat as total_area
-        if 'total_area' not in features and 'covered_area' not in features:
-            m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]', t)
-            if m:
-                features['total_area'] = float(m.group(1).replace(',', '.'))
-
-        # Ambientes → bedrooms
-        m = re.search(r'(\d+)\s*amb', t)
-        if m:
-            features['bedrooms'] = int(m.group(1))
-
-        # Dormitorios (more specific)
-        m = re.search(r'(\d+)\s*dorm', t)
-        if m:
-            features['bedrooms'] = int(m.group(1))
-
-        # Bathrooms
-        m = re.search(r'(\d+)\s*bañ', t)
-        if m:
-            features['bathrooms'] = int(m.group(1))
-
-        # Parking
-        m = re.search(r'(\d+)\s*coch', t)
-        if m:
-            features['parking_spaces'] = int(m.group(1))
-
-        return features
 
     def _parse_card(self, card) -> Optional[Dict[str, Any]]:
         """Parse a single property card element"""
@@ -731,7 +728,7 @@ class ZonapropListingScraper(BaseListingScraper):
                 features_text = " ".join(snippets)
 
         if features_text:
-            parsed = self._parse_features_text(features_text)
+            parsed = self.parse_features_text(features_text)
             data['total_area'] = parsed.get('total_area')
             data['covered_area'] = parsed.get('covered_area')
             data['bedrooms'] = parsed.get('bedrooms')
@@ -804,3 +801,233 @@ class ZonapropListingScraper(BaseListingScraper):
                     return max(int(n) for n in numbers)
 
         return None
+
+    # ── Detail page enrichment ─────────────────────────────────────
+
+    def _enrich_cards_from_detail(
+        self, cards: List[Dict[str, Any]], max_details: int = 30
+    ) -> List[Dict[str, Any]]:
+        """
+        Visit each property's detail page to extract all images and features.
+
+        The search page only provides 1 thumbnail per listing. Detail pages
+        have the full image gallery and additional property data.
+        """
+        import time
+
+        enriched = 0
+        to_enrich = cards[:max_details]
+        print(f"[DEBUG] [zonaprop] Enriching {len(to_enrich)} cards from detail pages...")
+
+        # Warm up: visit homepage first to get Cloudflare cookies
+        try:
+            print("[DEBUG] [zonaprop] Warming up driver with homepage visit...")
+            self.driver.get(self.BASE_URL)
+            time.sleep(3)
+        except Exception as e:
+            logger.debug(f"[zonaprop] Warmup failed: {e}")
+
+        for i, card in enumerate(to_enrich):
+            url = card.get('source_url')
+            if not url:
+                continue
+            try:
+                detail_data = self._extract_detail_data(url)
+
+                # Merge images (detail page has the full gallery)
+                if detail_data.get('images'):
+                    card['images'] = detail_data['images']
+
+                # Merge features not already in the search card
+                for key in [
+                    'total_area', 'covered_area', 'semi_covered_area',
+                    'uncovered_area', 'bedrooms', 'bathrooms',
+                    'parking_spaces', 'description', 'address', 'neighborhood',
+                ]:
+                    if detail_data.get(key) is not None and not card.get(key):
+                        card[key] = detail_data[key]
+
+                n_imgs = len(detail_data.get('images', []))
+                enriched += 1
+                print(f"[DEBUG] [zonaprop]   Card {i+1}/{len(to_enrich)}: {n_imgs} images")
+
+            except Exception as e:
+                logger.debug(f"[zonaprop] Error enriching card {i+1}: {e}")
+                print(f"[DEBUG] [zonaprop]   Card {i+1}/{len(to_enrich)}: ERROR - {e}")
+
+            # Rate limit between detail pages (longer delay to avoid CF blocking)
+            if i < len(to_enrich) - 1:
+                time.sleep(4)
+
+        print(f"[DEBUG] [zonaprop] Enriched {enriched}/{len(to_enrich)} cards")
+        return cards
+
+    def _extract_detail_data(self, url: str) -> Dict[str, Any]:
+        """Extract images and features from a property detail page."""
+        import time
+
+        data: Dict[str, Any] = {}
+
+        self.driver.get(url)
+        time.sleep(3)
+
+        # Scroll to trigger lazy loading
+        try:
+            total_height = self.driver.execute_script("return document.body.scrollHeight")
+            for scroll_pos in range(0, min(total_height, 3000), 500):
+                self.driver.execute_script(f"window.scrollTo(0, {scroll_pos});")
+                time.sleep(0.2)
+            self.driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(1)
+        except Exception:
+            pass
+
+        html = self.driver.page_source
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Extract images from gallery container
+        images = self._extract_detail_images(soup, html)
+        if images:
+            data['images'] = images
+
+        # Extract features
+        features = self._extract_detail_features(soup)
+        data.update(features)
+
+        # Extract description
+        desc_selectors = [
+            '[class*="description"] p',
+            '[class*="Description"] p',
+            '#description',
+            '.posting-description',
+        ]
+        for sel in desc_selectors:
+            desc_elem = soup.select_one(sel)
+            if desc_elem:
+                data['description'] = desc_elem.get_text(strip=True)[:2000]
+                break
+
+        # Extract address from h4 (Zonaprop pattern: "Street 123, Neighborhood, City")
+        for h4 in soup.find_all('h4'):
+            text = h4.get_text(strip=True)
+            if any(loc in text.lower() for loc in ['capital federal', 'buenos aires', ',']):
+                parts = [p.strip() for p in text.split(',') if p.strip()]
+                if parts:
+                    # First part with numbers is usually the address
+                    if any(c.isdigit() for c in parts[0]):
+                        data['address'] = parts[0]
+                    if len(parts) >= 2:
+                        data['neighborhood'] = parts[-2] if len(parts) > 2 else parts[-1]
+                break
+
+        return data
+
+    def _extract_detail_images(self, soup: BeautifulSoup, html: str) -> List[str]:
+        """Extract all property images from detail page."""
+        images: List[str] = []
+        seen: set = set()
+
+        # Strategy 1: Extract from embedded JavaScript 'pictures' array (has ALL images)
+        # Pattern: "url1200x1200": "https://imgar.zonapropcdn.com/avisos/..."
+        url_matches = re.findall(
+            r'"url1200x1200"\s*:\s*"(https://imgar\.zonapropcdn\.com/avisos/[^"]+)"',
+            html
+        )
+
+        for url in url_matches:
+            # Skip logos and agency images
+            if '/empresas/' not in url and url not in seen:
+                seen.add(url)
+                images.append(url)
+
+        # Strategy 2: Gallery container with direct img elements (fallback)
+        if len(images) < 3:
+            gallery_selectors = [
+                '#multimedia-content img',
+                '#new-gallery-portal img',
+                '.gallery-multimedia-represh img',
+                '.item-desktop img',
+            ]
+
+            for selector in gallery_selectors:
+                for img in soup.select(selector):
+                    for attr in ['src', 'data-src', 'data-lazy']:
+                        url = img.get(attr, '')
+                        if url and 'zonapropcdn.com/avisos/' in url and url not in seen:
+                            if '/empresas/' not in url:
+                                upgraded = self._upgrade_image_url(url)
+                                if upgraded not in seen:
+                                    seen.add(upgraded)
+                                    images.append(upgraded)
+                            break
+                if len(images) >= 3:
+                    break
+
+        # Strategy 3: Any img with zonapropcdn.com/avisos/ URL (last resort)
+        if len(images) < 3:
+            for img in soup.find_all('img'):
+                for attr in ['src', 'data-src']:
+                    url = img.get(attr, '')
+                    if url and 'zonapropcdn.com/avisos/' in url and url not in seen:
+                        if '/empresas/' not in url and '100x75' not in url:
+                            upgraded = self._upgrade_image_url(url)
+                            if upgraded not in seen:
+                                seen.add(upgraded)
+                                images.append(upgraded)
+                        break
+
+        return images[:20]
+
+    @staticmethod
+    def _upgrade_image_url(url: str) -> str:
+        """Upgrade Zonaprop image URL to higher resolution."""
+        # Replace small dimensions with 1200x1200
+        url = re.sub(r'/\d+x\d+/', '/1200x1200/', url)
+        # Also handle resize URLs
+        url = re.sub(r'/resize/(\d+)/', r'/\1/', url)
+        return url
+
+    def _extract_detail_features(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """Extract property features from detail page."""
+        features: Dict[str, Any] = {}
+
+        # Strategy 1: Look for h2.title-type-sup-property
+        # Format: "Departamento • 96m² • 4 ambientes • 1 cochera"
+        h2 = soup.find('h2', class_='title-type-sup-property')
+        if h2:
+            text = h2.get_text().lower()
+            amb_match = re.search(r'(\d+)\s*ambiente', text)
+            if amb_match:
+                features['bedrooms'] = int(amb_match.group(1))
+            coch_match = re.search(r'(\d+)\s*cochera', text)
+            if coch_match:
+                features['parking_spaces'] = int(coch_match.group(1))
+            area_match = re.search(r'(\d+)\s*m', text)
+            if area_match:
+                features['covered_area'] = float(area_match.group(1))
+
+        # Strategy 2: Look for li.icon-feature elements
+        for li in soup.find_all('li', class_='icon-feature'):
+            text = li.get_text().strip().lower()
+            if 'm² tot' in text or 'm2 tot' in text:
+                match = re.search(r'(\d+)', text)
+                if match:
+                    features['total_area'] = float(match.group(1))
+            elif 'm² cub' in text or 'm2 cub' in text:
+                match = re.search(r'(\d+)', text)
+                if match:
+                    features['covered_area'] = float(match.group(1))
+            elif 'baño' in text:
+                match = re.search(r'(\d+)', text)
+                if match:
+                    features['bathrooms'] = int(match.group(1))
+            elif 'dormitorio' in text:
+                match = re.search(r'(\d+)', text)
+                if match:
+                    features['bedrooms'] = int(match.group(1))
+
+        # Strategy 3: Look for mainFeatures in JavaScript
+        # Pattern: 'mainFeatures': { "CFT100": { ... "value": "45" ...
+        # This is a fallback if HTML elements aren't found
+
+        return features

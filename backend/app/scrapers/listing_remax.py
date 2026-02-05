@@ -174,7 +174,7 @@ class RemaxListingScraper(BaseListingScraper):
         /listings/buy?page=0&pageSize=24&sort=-createdAt&in:operationId=1&in:typeId=1,2&pricein=1:min:max&locations=in::::ID@Name:::
         """
         params = self.search_params
-        print(f"[DEBUG] [remax] Search params received: {params}", flush=True)
+        logger.debug(f"[remax] Search params received: {params}")
 
         # Build query parameters
         query_parts = []
@@ -198,9 +198,9 @@ class RemaxListingScraper(BaseListingScraper):
             prop_type_ids = self._get_property_type_from_cache(prop_param)
             if prop_type_ids:
                 query_parts.append(f"in:typeId={prop_type_ids}")
-                print(f"[DEBUG] [remax] Property type '{prop_param}' -> IDs: {prop_type_ids}", flush=True)
+                logger.debug(f"[remax] Property type '{prop_param}' -> IDs: {prop_type_ids}")
             else:
-                print(f"[DEBUG] [remax] Property type '{prop_param}' not found in cache", flush=True)
+                logger.debug(f"[remax] Property type '{prop_param}' not found in cache")
 
         # Price range
         min_price = params.get("min_price")
@@ -217,7 +217,7 @@ class RemaxListingScraper(BaseListingScraper):
         neighborhoods = params.get("neighborhoods", [])
         city = params.get("city", "")
 
-        print(f"[DEBUG] [remax] Neighborhoods: {neighborhoods}, City: '{city}'", flush=True)
+        logger.debug(f"[remax] Neighborhoods: {neighborhoods}, City: '{city}'")
 
         location_id = None
         location_name = None
@@ -230,7 +230,7 @@ class RemaxListingScraper(BaseListingScraper):
                 cached = self._get_location_from_cache(nb_key)
                 if cached:
                     location_id, location_name = cached
-                    print(f"[DEBUG] [remax] Found location from neighborhood '{nb}': ID={location_id}, Name={location_name}", flush=True)
+                    logger.debug(f"[remax] Found location from neighborhood '{nb}': ID={location_id}, Name={location_name}")
                     break
                 else:
                     location_not_found = nb
@@ -240,13 +240,13 @@ class RemaxListingScraper(BaseListingScraper):
             cached = self._get_location_from_cache(city_key)
             if cached:
                 location_id, location_name = cached
-                print(f"[DEBUG] [remax] Found location from city '{city}': ID={location_id}, Name={location_name}", flush=True)
+                logger.debug(f"[remax] Found location from city '{city}': ID={location_id}, Name={location_name}")
             else:
                 # Try partial match in cache
                 for key, (lid, lname) in self._location_cache.items():
                     if city_key in key or key in city_key:
                         location_id, location_name = lid, lname
-                        print(f"[DEBUG] [remax] Found location from partial match '{city}' -> '{key}': ID={location_id}", flush=True)
+                        logger.debug(f"[remax] Found location from partial match '{city}' -> '{key}': ID={location_id}")
                         break
 
                 if not location_id:
@@ -266,13 +266,13 @@ class RemaxListingScraper(BaseListingScraper):
             location_param = f"in::::{location_id}@{location_name}:::"
             query_parts.append(f"locations={quote(location_param, safe='')}")
         else:
-            print(f"[DEBUG] [remax] No location specified, using global search", flush=True)
+            logger.debug("[remax] No location specified, using global search")
 
         # Build URL
         base_path = "/listings/buy" if op_param == "venta" else "/listings/rent"
         full_url = f"{self.BASE_URL}{base_path}?{'&'.join(query_parts)}"
 
-        print(f"[DEBUG] [remax] Generated Search URL: {full_url}", flush=True)
+        logger.debug(f"[remax] Generated Search URL: {full_url}")
         return full_url
 
     async def fetch_page(self, url: str) -> str:
@@ -280,20 +280,27 @@ class RemaxListingScraper(BaseListingScraper):
         Fetch page with fallback:
         1. curl_cffi / httpx (may work if data is in initial HTML or embedded JSON)
         2. Selenium (for JavaScript-rendered content)
+
+        Remax is a React SPA — property links only appear after JS renders.
+        We check for actual property link patterns, not just the word "listings".
         """
         # Level 1+2: curl_cffi / httpx - try first, Remax may embed data in JSON
         try:
             html = await super().fetch_page(url)
-            # Check if we got meaningful content (Remax embeds JSON data in script tags)
-            if len(html) > 5000 and ('listings' in html or 'property' in html.lower() or '__NEXT_DATA__' in html):
-                logger.info(f"[remax] fetch_with_browser_fingerprint OK, length: {len(html)}")
+            # Check if we got ACTUAL property links (not just the word "listings" in JS code)
+            # Property URLs look like: /listings/ph-3-ambientes-... or /listings/venta-casa-...
+            has_property_links = bool(re.search(r'href="[^"]*?/listings/[a-z]+-[a-z]+-', html, re.IGNORECASE))
+            has_next_data = '__NEXT_DATA__' in html and '"listings"' in html
+
+            if len(html) > 5000 and (has_property_links or has_next_data):
+                logger.info(f"[remax] fetch_with_browser_fingerprint OK, length: {len(html)}, has_links={has_property_links}")
                 return html
-            logger.info("[remax] HTTP fetch got page but no listing data detected, trying Selenium...")
+            logger.info(f"[remax] HTTP fetch got page but no property links detected (length={len(html)}), trying Selenium...")
         except Exception as e:
             logger.warning(f"[remax] HTTP fetch failed: {e}, trying Selenium...")
 
         # Level 3: Selenium fallback for JS-rendered content
-        return self._fetch_with_selenium(url)
+        return await asyncio.to_thread(self._fetch_with_selenium, url)
 
     def _fetch_with_selenium(self, url: str) -> str:
         """Fetch page using Selenium for JavaScript-rendered content."""
@@ -317,39 +324,85 @@ class RemaxListingScraper(BaseListingScraper):
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
 
-            # Wait longer for React/JS content to render
-            time.sleep(6)
+            # Wait for Angular app to initialize
+            time.sleep(4)
 
-            # Scroll down to trigger lazy loading
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
-            time.sleep(2)
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-
-            # Try to wait for listing cards with various selectors
-            card_selectors = [
-                '[class*="CardContainer"]',
-                '[class*="property-card"]',
-                '[class*="listing-card"]',
-                '[class*="PropertyCard"]',
-                '[data-testid*="property"]',
-                '[class*="result-item"]',
-                'article',
-                '[class*="card"]',
+            # Remax-specific card selectors (Angular app uses these classes)
+            remax_card_selectors = [
+                'a.card-remax__href',  # Main card links
+                '.card-remax',  # Card containers
+                '[class*="card-remax"]',  # Any card-remax class
+                'a.carousel__href',  # Carousel image links
             ]
 
-            for selector in card_selectors:
+            # Try to wait for Remax-specific cards first
+            found_cards = False
+            for selector in remax_card_selectors:
                 try:
-                    WebDriverWait(driver, 3).until(
+                    WebDriverWait(driver, 8).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, selector))
                     )
-                    logger.debug(f"[remax] Found elements with selector: {selector}")
+                    logger.info(f"[remax] Found Remax cards with selector: {selector}")
+                    found_cards = True
                     break
                 except Exception:
                     continue
 
+            if not found_cards:
+                logger.warning("[remax] No Remax cards found, waiting longer and scrolling...")
+                # Scroll to trigger lazy loading
+                driver.execute_script("window.scrollTo(0, 300);")
+                time.sleep(2)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
+                time.sleep(3)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(3)
+                # Scroll back up to load all content
+                driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(2)
+
+                # Try waiting again
+                for selector in remax_card_selectors:
+                    try:
+                        WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        logger.info(f"[remax] Found Remax cards after scrolling: {selector}")
+                        found_cards = True
+                        break
+                    except Exception:
+                        continue
+
+            if not found_cards:
+                # Fallback: try generic card selectors
+                generic_selectors = [
+                    '[class*="CardContainer"]',
+                    '[class*="property-card"]',
+                    '[class*="listing-card"]',
+                    'article',
+                ]
+                for selector in generic_selectors:
+                    try:
+                        WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        logger.info(f"[remax] Found generic cards: {selector}")
+                        break
+                    except Exception:
+                        continue
+
+            # Final wait for any remaining JS rendering
+            time.sleep(2)
+
             html = driver.page_source
             logger.info(f"[remax] Got HTML via Selenium, length: {len(html)}")
+
+            # Debug: check if cards are in the HTML
+            if 'card-remax__href' in html:
+                logger.info("[remax] card-remax__href found in HTML source")
+            else:
+                logger.warning("[remax] card-remax__href NOT found in HTML source")
+
             return html
 
         except Exception as e:
@@ -424,11 +477,13 @@ class RemaxListingScraper(BaseListingScraper):
             self._last_raw_count = 0
             return []
 
+
+
         cards = []
 
         # Debug: show all links on the page to understand structure
         all_links = self.soup.select('a[href]')
-        print(f"[DEBUG] [remax] Total links on page: {len(all_links)}", flush=True)
+        logger.debug(f"[remax] Total links on page: {len(all_links)}")
 
         # Collect unique hrefs for debugging
         hrefs_debug = set()
@@ -439,8 +494,8 @@ class RemaxListingScraper(BaseListingScraper):
 
         # Show listing-like hrefs
         listing_hrefs = [h for h in hrefs_debug if '/listing' in h.lower()]
-        print(f"[DEBUG] [remax] Listing-like hrefs: {listing_hrefs[:15]}", flush=True)
-        print(f"[DEBUG] [remax] Sample hrefs: {list(hrefs_debug)[:20]}", flush=True)
+        logger.debug(f"[remax] Listing-like hrefs: {listing_hrefs[:15]}")
+        logger.debug(f"[remax] Sample hrefs: {list(hrefs_debug)[:20]}")
 
         # Debug: Show relevant CSS classes
         all_elements = self.soup.select('[class]')
@@ -449,11 +504,14 @@ class RemaxListingScraper(BaseListingScraper):
             for cls in elem.get('class', []):
                 if any(kw in cls.lower() for kw in ['card', 'listing', 'property', 'result', 'item']):
                     class_names.add(cls)
-        print(f"[DEBUG] [remax] Relevant CSS classes: {list(class_names)[:30]}", flush=True)
+        logger.debug(f"[remax] Relevant CSS classes: {list(class_names)[:30]}")
 
         # Look for property links with multiple patterns
+        # Remax uses Angular and specific class names for property cards
         property_patterns = [
-            'a[href*="/listings/"]',  # Standard listings path
+            'a.card-remax__href[href*="/listings/"]',  # Remax card links (most specific)
+            'a.carousel__href[href*="/listings/"]',  # Remax carousel image links
+            'a[href*="/listings/"]',  # Standard listings path (fallback)
             'a[href*="remax.com.ar/listing"]',  # Absolute URLs
             'a[href*="/propiedad"]',  # Alternative property path
             'a[href*="MLS"]',  # MLS number links
@@ -463,6 +521,13 @@ class RemaxListingScraper(BaseListingScraper):
 
         for pattern in property_patterns:
             links = self.soup.select(pattern)
+            logger.info(f"[remax] Pattern '{pattern}' found {len(links)} links")
+
+            # Debug: show first few hrefs for this pattern
+            if links:
+                sample_hrefs = [l.get('href', '')[:80] for l in links[:5]]
+                logger.info(f"[remax] Sample hrefs for '{pattern}': {sample_hrefs}")
+
             for link in links:
                 href = link.get('href', '')
                 if not href:
@@ -474,12 +539,14 @@ class RemaxListingScraper(BaseListingScraper):
                     '/listings?', 'page=', '/propiedades-en-'
                 ]
                 if any(skip in href for skip in skip_patterns):
+                    logger.debug(f"[remax] Skipping search/category URL: {href[:80]}")
                     continue
 
                 # For /listings/ URLs, ensure there's an actual slug after
                 if '/listings/' in href:
                     path_after = href.split('/listings/')[-1].split('?')[0]
                     if not path_after or path_after in ['buy', 'rent', 'sell', '']:
+                        logger.debug(f"[remax] Skipping empty slug URL: {href[:80]}")
                         continue
 
                 # Build full URL
@@ -499,19 +566,114 @@ class RemaxListingScraper(BaseListingScraper):
                 card_data = self._extract_card_data(link, full_url)
                 if card_data:
                     cards.append(card_data)
+                    logger.info(f"[remax] Added card: {full_url[:70]}...")
 
         if not cards:
-            print("[DEBUG] [remax] No cards found with link patterns, trying card containers...", flush=True)
+            logger.debug("[remax] No cards found with link patterns, trying card containers...")
             cards = self._extract_cards_from_containers()
+
+        # Enrich cards with all photos from ng-state JSON
+        self._enrich_cards_with_photos(cards)
 
         # Update raw count state for scrape_all_pages logic
         self._last_raw_count = len(cards)
-        print(f"[DEBUG] [remax] Extracted {len(cards)} raw property cards", flush=True)
+        logger.debug(f"[remax] Extracted {len(cards)} raw property cards")
 
         # Return all cards without aggressive filtering
         # The URL already filters by location when available
         # Only apply minimal filtering for specific edge cases
         return cards
+
+    CDN_BASE_URL = "https://d1acdg20u0pmxj.cloudfront.net/"
+
+    def _build_cdn_image_url(self, raw_path: str) -> Optional[str]:
+        """Build a CDN image URL from a rawValue path (listings/UUID/UUID)."""
+        if not raw_path:
+            return None
+        if raw_path.startswith("http"):
+            return raw_path
+        raw_path = raw_path.lstrip("/")
+        parts = raw_path.split("/")
+        if len(parts) == 3 and parts[0] == "listings":
+            listing_uuid = parts[1]
+            image_uuid = re.sub(r'\.\w+$', '', parts[2])
+            return f"{self.CDN_BASE_URL}listings/{listing_uuid}/1080xAUTO/{image_uuid}.jpg"
+        if len(parts) == 4 and parts[0] == "listings":
+            listing_uuid = parts[1]
+            image_uuid = re.sub(r'\.\w+$', '', parts[3])
+            return f"{self.CDN_BASE_URL}listings/{listing_uuid}/1080xAUTO/{image_uuid}.jpg"
+        return f"{self.CDN_BASE_URL}{raw_path}"
+
+    def _enrich_cards_with_photos(self, cards: List[Dict[str, Any]]) -> None:
+        """
+        Enrich card data with all photos from ng-state JSON.
+
+        The ng-state script contains full listing data including all photos.
+        Match listings to cards by slug and add all image URLs.
+        """
+        if not self.soup or not cards:
+            return
+
+        ng_state = self.soup.find('script', id='ng-state', type='application/json')
+        if not ng_state or not ng_state.string:
+            return
+
+        try:
+            data = json.loads(ng_state.string)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        # Build slug -> photos mapping from ng-state
+        slug_to_photos: Dict[str, List[str]] = {}
+        for key, value in data.items():
+            if not isinstance(value, dict) or 'b' not in value:
+                continue
+            b = value['b']
+            if not isinstance(b, dict) or 'data' not in b:
+                continue
+            outer = b['data']
+            if not isinstance(outer, dict) or 'data' not in outer:
+                continue
+            items = outer['data']
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                slug = item.get('slug', '')
+                photos = item.get('photos', [])
+                if slug and photos:
+                    urls = []
+                    for photo in photos:
+                        if isinstance(photo, dict):
+                            raw = photo.get('rawValue', '') or photo.get('value', '')
+                            if raw:
+                                url = self._build_cdn_image_url(raw)
+                                if url:
+                                    urls.append(url)
+                    if urls:
+                        slug_to_photos[slug] = urls
+
+        if not slug_to_photos:
+            return
+
+        logger.info(f"[remax] Found photos for {len(slug_to_photos)} listings in ng-state")
+
+        # Match cards to photos by slug
+        for card in cards:
+            source_url = card.get('source_url', '')
+            # Extract slug from URL: /listings/{slug}
+            match = re.search(r'/listings/([^/?]+)', source_url)
+            if not match:
+                continue
+            slug = match.group(1)
+            photos = slug_to_photos.get(slug)
+            if photos:
+                card['images'] = photos[:20]
+                # Update thumbnail to first photo if current thumbnail is missing or SVG
+                if not card.get('thumbnail_url') or '.svg' in (card.get('thumbnail_url') or ''):
+                    card['thumbnail_url'] = photos[0]
 
     def _extract_cards_from_containers(self) -> List[Dict[str, Any]]:
         """Fallback: Extract property cards by finding card containers"""
@@ -533,7 +695,7 @@ class RemaxListingScraper(BaseListingScraper):
         for selector in container_selectors:
             containers = self.soup.select(selector)
             if containers:
-                print(f"[DEBUG] [remax] Found {len(containers)} containers with selector: {selector}")
+                logger.debug(f"[remax] Found {len(containers)} containers with selector: {selector}")
 
                 for container in containers:
                     # Find link within container
@@ -613,7 +775,7 @@ class RemaxListingScraper(BaseListingScraper):
                                     cards.append(card)
 
                         if cards:
-                            print(f"[DEBUG] [remax] Extracted {len(cards)} cards from JSON data")
+                            logger.debug(f"[remax] Extracted {len(cards)} cards from JSON data")
                             return cards
 
                     except json.JSONDecodeError:
@@ -681,27 +843,32 @@ class RemaxListingScraper(BaseListingScraper):
             'currency': None,
             'thumbnail_url': None,
             'location_preview': None,
+            'address': None,
         }
 
         # Try to find the parent card container
+        # Remax structure: div.card-remax > div.card-remax__container > a.card-remax__href
+        # Property images are in the carousel at div.card-remax level,
+        # NOT inside div.card-remax__container (which only has SVG icons).
+        # We need to walk up to div.card-remax (the outermost card div).
         parent = link_elem
-        for _ in range(5):  # Go up to 5 levels
+        card_candidate = None
+        for _ in range(6):  # Go up to 6 levels
             parent = parent.parent
             if parent is None:
                 break
-            # Check if this looks like a card container
             parent_class = parent.get('class', [])
-            # Must contain 'card', 'listing', or 'property'
-            # But MUST NOT contain 'image', 'img', 'carousel', 'slider' to avoid selecting just the image part
             is_card = any('card' in c.lower() or 'listing' in c.lower() or 'property' in c.lower()
                    for c in parent_class if isinstance(c, str))
             is_image = any('image' in c.lower() or 'img' in c.lower() or 'carousel' in c.lower() or 'slider' in c.lower()
                    for c in parent_class if isinstance(c, str))
 
             if is_card and not is_image:
-                break
+                card_candidate = parent
+                # Don't break - keep going up to find the outermost card container
+                # e.g. card-remax__container -> card-remax
 
-        search_context = parent if parent else link_elem
+        search_context = card_candidate if card_candidate else (parent if parent else link_elem)
 
         # Extract title
         # Remax often puts the title in .card__description
@@ -726,29 +893,149 @@ class RemaxListingScraper(BaseListingScraper):
             data['price'] = price_amount
             data['currency'] = currency
 
-        # Extract image
-        img_elem = search_context.select_one('img')
-        if img_elem:
+        # Extract all property images from HTML - skip SVGs, icons, assets, agent photos
+        html_images = []
+        for img_elem in search_context.find_all('img'):
+            img_url = None
             for attr in ['src', 'data-src', 'data-lazy', 'srcset']:
-                img_url = img_elem.get(attr)
-                if img_url and not img_url.startswith('data:'):
+                candidate = img_elem.get(attr)
+                if candidate and not candidate.startswith('data:'):
                     if attr == 'srcset':
-                        img_url = img_url.split(',')[0].split()[0]
-                    if img_url.startswith('//'):
-                        data['thumbnail_url'] = f"https:{img_url}"
-                    elif img_url.startswith('/'):
-                        data['thumbnail_url'] = urljoin(self.BASE_URL, img_url)
-                    else:
-                        data['thumbnail_url'] = img_url
+                        candidate = candidate.split(',')[0].split()[0]
+                    img_url = candidate
                     break
 
+            if not img_url:
+                continue
+
+            # Skip non-property images
+            url_lower = img_url.lower()
+            if any(skip in url_lower for skip in ['.svg', '/assets/', '/icons/', '/agents/', '/logo', '/avatar/']):
+                continue
+
+            if img_url.startswith('//'):
+                img_url = f"https:{img_url}"
+            elif img_url.startswith('/'):
+                img_url = urljoin(self.BASE_URL, img_url)
+
+            if img_url not in html_images:
+                html_images.append(img_url)
+
+        if html_images:
+            data['thumbnail_url'] = html_images[0]
+            data['images'] = html_images
+
         # Extract location
-        # Remax has .card__address and .card__ubication
-        location_elem = search_context.select_one(
-            '.card__address, .card__ubication, [class*="location"], [class*="Location"], [class*="address"], [class*="Address"]'
-        )
-        if location_elem:
-            data['location_preview'] = location_elem.get_text(strip=True)[:200]
+        # Remax separates street address (.card__address) and neighborhood/city (.card__ubication)
+        
+        # 1. Street Address
+        # Use specific class first
+        address_elem = search_context.select_one('.card__address')
+        if not address_elem:
+             address_elem = search_context.select_one('[class*="address"]:not([class*="ubication"])')
+        
+        if address_elem:
+            val = address_elem.get_text(strip=True)
+            if val:
+                data['address'] = val[:200]
+        
+        # 2. Neighborhood / City
+        # Avoid matching the parent container .card__ubication-and-address
+        ubication_elem = search_context.select_one('.card__ubication')
+        if not ubication_elem:
+             ubication_elem = search_context.select_one('[class*="ubication"]:not([class*="address"])')
+             
+        if ubication_elem:
+            val = ubication_elem.get_text(strip=True)
+            if val:
+                data['location_preview'] = val[:200]
+        
+        # Fallback if separate fields not found
+        if not data.get('address') and not data.get('location_preview'):
+             location_elem = search_context.select_one(
+                '[class*="location"], [class*="Location"]'
+             )
+             if location_elem:
+                 data['location_preview'] = location_elem.get_text(strip=True)[:200]
+
+        # Extract Features (Area, Rooms, Baths)
+        # Look for feature items
+        feature_items = search_context.select('.card__feature--item, .feature--item, [class*="feature--item"]')
+        
+        obs_list = []
+        for item in feature_items:
+            text = item.get_text(strip=True).lower()
+            
+            # Clean text for easier parsing
+            clean_token = text.replace(':', '')
+            
+            # Helper to extract float safely
+            def get_float(s):
+                # Matches numbers like 54.44 or 54,44 or 100
+                match = re.search(r'(\d+(?:[\.,]\d+)?)', s)
+                if match:
+                    val_str = match.group(1).replace(',', '.')
+                    # If it looks like thousands (e.g. 1.200), we might need careful handling,
+                    # but for area 54.44 is common.
+                    # User reported 88.06 becoming 8806.
+                    return float(val_str)
+                return None
+
+            # Area
+            if 'm² totales' in clean_token:
+                val = get_float(clean_token)
+                if val:
+                    data['total_area'] = val
+            elif 'm² cubiertos' in clean_token:
+                val = get_float(clean_token)
+                if val:
+                    data['covered_area'] = val
+            elif 'semicubierta' in clean_token or 'semi cub' in clean_token:
+                val = get_float(clean_token)
+                if val:
+                    # Storing in a custom way or relying on schema?
+                    # Schema usually has total/covered. We can put this in observations or just log it.
+                    # User said "semi_covered_area" in db. If not in dict, maybe put in observations?
+                    # The standard dictionary keys check: 'semi_covered_area' isn't standard in Monitoring?
+                    # Let's check if we can add it to data. If parser ignores it, fine.
+                    data['semi_covered_area'] = val
+
+            # Rooms / Bedrooms
+            elif 'dormitorio' in clean_token:
+                nums = re.findall(r'(\d+)', clean_token)
+                if nums:
+                    data['bedrooms'] = int(nums[0])
+            elif 'ambiente' in clean_token and 'bedrooms' not in data:
+                # Fallback: Estimate bedrooms as environments - 1 (usually living room)
+                nums = re.findall(r'(\d+)', clean_token)
+                if nums:
+                    amb = int(nums[0])
+                    data['bedrooms'] = max(0, amb - 1) if amb > 1 else 0
+
+            # Bathrooms
+            elif 'baño' in clean_token:
+                nums = re.findall(r'(\d+)', clean_token)
+                if nums:
+                    data['bathrooms'] = int(nums[0])
+            
+            # Parking
+            elif 'cochera' in clean_token:
+                 nums = re.findall(r'(\d+)', clean_token)
+                 if nums:
+                     data['parking_spaces'] = int(nums[0])
+                 else:
+                     data['parking_spaces'] = 1
+            
+            # Observations (Antiquity, Floors)
+            # We iterate all items, so we can append to a list then join
+            elif 'antigüedad' in clean_token or 'años' in clean_token:
+                 obs_list.append(item.get_text(strip=True))
+            elif 'pisos' in clean_token:
+                 obs_list.append(item.get_text(strip=True))
+
+        if obs_list:
+             data['observations'] = ' | '.join(obs_list)
+
 
         # If location preview is just address, try to append from URL slug if possible?
         # Actually, let's just stick to what's on the card for now.
@@ -777,17 +1064,32 @@ class RemaxListingScraper(BaseListingScraper):
             'button[class*="next"]',
             '[class*="pagination"] a',
             'a[rel="next"]',
+            'button[aria-label*="Next"]',
+            'button[aria-label*="Siguiente"]',
         ]
 
         for selector in pagination_selectors:
             try:
                 elements = self.soup.select(selector)
                 for elem in elements:
+                    # Check disabled state
+                    if elem.has_attr('disabled'):
+                        continue
+                    
+                    # For buttons with aria-label, we trust the label
+                    if elem.name == 'button' and ('next' in elem.get('aria-label', '').lower() or 'siguiente' in elem.get('aria-label', '').lower()):
+                        return True
+
                     text = elem.get_text(strip=True).lower()
                     if 'siguiente' in text or 'next' in text or '>' in text:
                         return True
             except Exception:
                 continue
+
+        # Debug: Dump HTML for card analysis
+        with open("remax_card_dump.html", "w", encoding="utf-8") as f:
+            f.write(str(self.soup))
+        logger.info("[remax] Dumped HTML to remax_card_dump.html for analysis")
 
         return False
 

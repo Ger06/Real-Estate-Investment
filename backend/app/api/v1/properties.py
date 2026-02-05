@@ -450,6 +450,11 @@ async def rescrape_all_properties(
 
                 # Update location
                 property_obj.address = scraped_data.get('address', property_obj.address)
+                # Only update street/street_number if they're empty (preserve manual edits)
+                if not property_obj.street and scraped_data.get('street'):
+                    property_obj.street = scraped_data.get('street')
+                if not property_obj.street_number and scraped_data.get('street_number'):
+                    property_obj.street_number = scraped_data.get('street_number')
                 property_obj.neighborhood = location_data.get('neighborhood', property_obj.neighborhood)
                 property_obj.city = location_data.get('city', property_obj.city)
                 property_obj.province = location_data.get('province', property_obj.province)
@@ -553,9 +558,11 @@ def _scraped_to_property(scraped_data: dict, user_id: UUID) -> dict:
         'price': scraped_data.get('price', 0),
         'currency': scraped_data.get('currency', 'USD'),
         'address': scraped_data.get('address'),
+        'street': scraped_data.get('street'),
+        'street_number': scraped_data.get('street_number'),
         'neighborhood': location_data.get('neighborhood'),
-        'city': location_data.get('city', 'Buenos Aires'),
-        'province': location_data.get('province', 'Buenos Aires'),
+        'city': location_data.get('city', 'Capital Federal'),
+        'province': location_data.get('province', 'Capital Federal'),
         'covered_area': features.get('covered_area'),
         'total_area': features.get('total_area'),
         'bedrooms': features.get('bedrooms'),

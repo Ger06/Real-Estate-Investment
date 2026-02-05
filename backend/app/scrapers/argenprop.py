@@ -6,6 +6,7 @@ import re
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse, urljoin
 from .base import BaseScraper
+from .utils import clean_price as _clean_price
 
 
 class ArgenpropScraper(BaseScraper):
@@ -23,6 +24,9 @@ class ArgenpropScraper(BaseScraper):
         if not self.soup:
             raise ValueError("HTML not parsed. Call fetch_page() first.")
 
+        # Extract address details
+        address_info = self._extract_address_details()
+
         data = {
             "source": "argenprop",
             "title": self._extract_title(),
@@ -32,7 +36,9 @@ class ArgenpropScraper(BaseScraper):
             "property_type": self._extract_property_type(),
             "operation_type": self._extract_operation_type(),
             "location": self._extract_location(),
-            "address": self._extract_address(),
+            "address": address_info.get('full_address', ''),
+            "street": address_info.get('street', ''),
+            "street_number": address_info.get('street_number', ''),
             "images": self._extract_images(),
             "features": self._extract_features(),
             "contact": self._extract_contact(),
@@ -90,15 +96,8 @@ class ArgenpropScraper(BaseScraper):
             if price_text:
                 break
 
-        # Clean price text and convert to float
-        # Remove currency symbols, dots (thousands), and keep only numbers
-        price_clean = re.sub(r'[^\d,]', '', price_text)
-        price_clean = price_clean.replace(',', '.')
-
-        try:
-            return float(price_clean) if price_clean else None
-        except ValueError:
-            return None
+        price_amount, _ = _clean_price(price_text)
+        return price_amount
 
     def _extract_currency(self) -> str:
         """Extract currency (USD or ARS)"""
@@ -214,42 +213,47 @@ class ArgenpropScraper(BaseScraper):
         province = "Buenos Aires"
 
         # Strategy 1: Look for titlebar with format "Venta en Coghlan, Capital Federal"
-        titlebar = self.soup.select_one('h2.titlebar__title')
-        if titlebar:
-            text = titlebar.get_text(strip=True)
-            # Parse "Venta en Coghlan, Capital Federal" or "Alquiler en Palermo, Capital Federal"
-            match = re.search(r'(?:Venta|Alquiler|Alquiler temporario)\s+en\s+([^,]+),\s*(.+)', text, re.IGNORECASE)
-            if match:
-                neighborhood = match.group(1).strip()
-                city = match.group(2).strip()
+        titlebar_selectors = [
+            'h2.titlebar__title',
+            'h2[class*="titlebar"]',
+            '.titlebar h2',
+            '.titlebar__title',
+        ]
+        for sel in titlebar_selectors:
+            titlebar = self.soup.select_one(sel)
+            if titlebar:
+                text = titlebar.get_text(strip=True)
+                match = re.search(
+                    r'(?:Venta|Alquiler|Alquiler temporario)\s+en\s+([^,]+),\s*(.+)',
+                    text, re.IGNORECASE,
+                )
+                if match:
+                    neighborhood = match.group(1).strip()
+                    city = match.group(2).strip()
+                    break
 
-        # Strategy 2: Look for spans with location info
+        # Strategy 2: Look for any element with "Venta en X, Y" or "Alquiler en X, Y"
         if not neighborhood:
-            # Argenprop sometimes has spans with just the neighborhood/city
-            for span in self.soup.find_all('span'):
-                text = span.get_text(strip=True)
-                if text and len(text) < 50:
-                    text_lower = text.lower()
-                    # Check if it's a known neighborhood
-                    known_neighborhoods = [
-                        'palermo', 'belgrano', 'recoleta', 'caballito', 'coghlan',
-                        'villa crespo', 'colegiales', 'nuñez', 'nunez', 'almagro',
-                        'san telmo', 'villa urquiza', 'saavedra', 'chacarita',
-                        'villa devoto', 'flores', 'floresta', 'boedo', 'barracas'
-                    ]
-                    for nb in known_neighborhoods:
-                        if text_lower == nb:
-                            neighborhood = text
-                            break
-                    if text_lower == 'capital federal':
-                        city = text
+            for tag in self.soup.find_all(['h1', 'h2', 'h3', 'p', 'span', 'div']):
+                text = tag.get_text(strip=True)
+                if len(text) > 150 or len(text) < 10:
+                    continue
+                match = re.search(
+                    r'(?:Venta|Alquiler|Alquiler temporario)\s+en\s+([^,]+),\s*(.+)',
+                    text, re.IGNORECASE,
+                )
+                if match:
+                    neighborhood = match.group(1).strip()
+                    city = match.group(2).strip()
+                    break
 
-        # Strategy 3: Traditional selectors
+        # Strategy 3: Location/address CSS selectors
         if not neighborhood:
             selectors = [
                 '.location',
                 '[class*="location"]',
                 '.property-location',
+                '[class*="ubic"]',
             ]
 
             for selector in selectors:
@@ -262,13 +266,47 @@ class ArgenpropScraper(BaseScraper):
                         city = parts[1]
                     break
 
-        # Strategy 4: Extract from URL as fallback
-        # URL format: /ph-en-venta-en-coghlan-3-ambientes--18186163
+        # Strategy 4: Look for spans/small elements with known neighborhoods
+        if not neighborhood:
+            known_neighborhoods = [
+                'palermo', 'belgrano', 'recoleta', 'caballito', 'coghlan',
+                'villa crespo', 'colegiales', 'nuñez', 'nunez', 'almagro',
+                'san telmo', 'villa urquiza', 'saavedra', 'chacarita',
+                'villa devoto', 'flores', 'floresta', 'boedo', 'barracas',
+                'villa del parque', 'villa luro', 'villa pueyrredon',
+                'liniers', 'mataderos', 'paternal', 'parque patricios',
+                'puerto madero', 'san nicolas', 'monserrat', 'barrio norte',
+                'constitucion', 'balvanera', 'la boca',
+            ]
+            for elem in self.soup.find_all(['span', 'p', 'div', 'a']):
+                text = elem.get_text(strip=True)
+                if not text or len(text) > 60:
+                    continue
+                text_lower = text.lower().strip()
+                for nb in known_neighborhoods:
+                    if text_lower == nb or text_lower.startswith(nb + ','):
+                        neighborhood = text.split(',')[0].strip()
+                        break
+                if not city and text_lower == 'capital federal':
+                    city = text
+                if neighborhood:
+                    break
+
+        # Strategy 5: Extract from URL as fallback
+        # URL formats: /ph-en-venta-en-coghlan-3-ambientes--18186163
+        #              /departamento-en-venta-en-villa-crespo--12345
         if not neighborhood:
             url_lower = self.url.lower()
+            # Try with ambientes suffix
             match = re.search(r'-en-([a-z-]+)-\d+-ambientes', url_lower)
+            if not match:
+                # Try without ambientes: -en-NEIGHBORHOOD--ID
+                match = re.search(r'-en-([a-z][a-z-]+?)--\d+', url_lower)
             if match:
-                neighborhood = match.group(1).replace('-', ' ').title()
+                raw = match.group(1).strip('-')
+                # Skip generic location words
+                if raw not in ('venta', 'alquiler', 'capital-federal', 'buenos-aires'):
+                    neighborhood = raw.replace('-', ' ').title()
 
         # Normalize city
         if not city:
@@ -282,20 +320,71 @@ class ArgenpropScraper(BaseScraper):
             "province": province,
         }
 
-    def _extract_address(self) -> str:
-        """Extract street address"""
+    def _extract_address_details(self) -> Dict[str, str]:
+        """
+        Extract address details including street and number.
+        Returns dict with 'full_address', 'street', 'street_number'.
+        """
+        result = {
+            'full_address': '',
+            'street': '',
+            'street_number': '',
+        }
+
         selectors = [
+            '.titlebar__address',
             '[class*="address"]',
             '.street-address',
             'address',
+            '[class*="direccion"]',
         ]
 
         for selector in selectors:
             addr = self.extract_text(selector)
             if addr:
-                return addr
+                result['full_address'] = addr
+                self._parse_street_number(result, addr)
+                return result
 
-        return ""
+        # Fallback: look for text that matches street address patterns
+        if self.soup:
+            for elem in self.soup.find_all(['p', 'span', 'div', 'h3']):
+                text = elem.get_text(strip=True)
+                if not text or len(text) > 120 or len(text) < 5:
+                    continue
+                # Match patterns like "Av. Balbin 2800" or "Calle 123"
+                if re.match(
+                    r'^(Av\.?|Avenida|Calle|Bv\.?|Boulev|Pasaje|Pje\.?)\s',
+                    text, re.IGNORECASE,
+                ):
+                    result['full_address'] = text
+                    self._parse_street_number(result, text)
+                    return result
+                # Match "Word(s) 1234" (street name + number)
+                if re.match(r'^[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(\s[A-Za-záéíóúñ]+)*\s\d{2,5}$', text):
+                    result['full_address'] = text
+                    self._parse_street_number(result, text)
+                    return result
+
+        return result
+
+    def _parse_street_number(self, result: Dict[str, str], address: str) -> None:
+        """Parse street and number from address string."""
+        if not address:
+            return
+
+        # Pattern: "Street Name 1234" or "Av. Street Name 1234"
+        match = re.match(r'^(.+?)\s+(\d+)\s*$', address)
+        if match:
+            result['street'] = match.group(1).strip()
+            result['street_number'] = match.group(2)
+        else:
+            # No number found, entire address is street
+            result['street'] = address
+
+    def _extract_address(self) -> str:
+        """Extract street address (legacy compatibility)"""
+        return self._extract_address_details().get('full_address', '')
 
     def _normalize_image_url(self, img_url: str) -> Optional[str]:
         """Convert relative URLs to absolute, validate format"""

@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     SCRAPING_USER_AGENT: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     SCRAPING_RATE_LIMIT: int = 2  # requests per second
     SCRAPING_TIMEOUT: int = 30  # seconds
-    
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # or "console"
