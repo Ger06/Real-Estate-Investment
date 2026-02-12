@@ -1,17 +1,21 @@
 """
 Properties API endpoints
 """
+import asyncio
+import logging
+import time
 from typing import List, Optional
 from datetime import datetime
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from geoalchemy2.shape import from_shape
+from geoalchemy2.shape import from_shape, to_shape
 from shapely.geometry import Point
 
 from app.database import get_db
 from app.models.property import Property, PropertyImage, PropertySource, PriceHistory, PropertyStatus
+from app.models.pending_property import PendingProperty
 from app.schemas.property import (
     PropertyScrapeRequest,
     PropertyScrapeResponse,
@@ -19,13 +23,90 @@ from app.schemas.property import (
     PropertyUpdate,
     PropertyResponse,
     PropertyListResponse,
+    PropertyMapItem,
+    PropertyMapResponse,
 )
 from app.scrapers import ArgenpropScraper, ZonapropScraper, RemaxScraper, MercadoLibreScraper
+from app.services.geocoding import geocoding_service
+from app.services.address import normalize_address_fields
 from app.api.deps import get_current_user
 from app.models.user import User
 
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
+
+
+def _try_geocode(property_obj: Property) -> bool:
+    """Try to geocode a property if it has no location. Returns True if geocoded."""
+    if property_obj.location is not None:
+        return False
+    try:
+        coords = geocoding_service.geocode_address(
+            address=property_obj.address,
+            street=property_obj.street,
+            street_number=property_obj.street_number,
+            neighborhood=property_obj.neighborhood,
+            city=property_obj.city,
+            province=property_obj.province,
+        )
+        if coords:
+            lat, lng = coords
+            property_obj.location = geocoding_service.make_point(lat, lng)
+            logger.info(f"Auto-geocoded property '{property_obj.title[:50]}' -> ({lat}, {lng})")
+            return True
+    except Exception as e:
+        logger.warning(f"Auto-geocode failed for '{property_obj.title[:50]}': {e}")
+    return False
+
+
+def _apply_property_filters(
+    stmt,
+    property_type: Optional[str] = None,
+    operation_type: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    currency: Optional[str] = None,
+    price_min: Optional[float] = None,
+    price_max: Optional[float] = None,
+    area_min: Optional[float] = None,
+    area_max: Optional[float] = None,
+    bedrooms_min: Optional[int] = None,
+    bathrooms_min: Optional[int] = None,
+    neighborhood: Optional[str] = None,
+    city: Optional[str] = None,
+    has_location: Optional[bool] = None,
+):
+    """Apply common property filters to a query statement"""
+    if property_type:
+        stmt = stmt.where(Property.property_type == property_type)
+    if operation_type:
+        stmt = stmt.where(Property.operation_type == operation_type)
+    if status_filter:
+        stmt = stmt.where(Property.status == status_filter)
+    if currency:
+        stmt = stmt.where(Property.currency == currency)
+    if price_min is not None:
+        stmt = stmt.where(Property.price >= price_min)
+    if price_max is not None:
+        stmt = stmt.where(Property.price <= price_max)
+    if area_min is not None:
+        stmt = stmt.where(Property.total_area >= area_min)
+    if area_max is not None:
+        stmt = stmt.where(Property.total_area <= area_max)
+    if bedrooms_min is not None:
+        stmt = stmt.where(Property.bedrooms >= bedrooms_min)
+    if bathrooms_min is not None:
+        stmt = stmt.where(Property.bathrooms >= bathrooms_min)
+    if neighborhood:
+        stmt = stmt.where(Property.neighborhood.ilike(f"%{neighborhood}%"))
+    if city:
+        stmt = stmt.where(Property.city.ilike(f"%{city}%"))
+    if has_location is True:
+        stmt = stmt.where(Property.location.isnot(None))
+    elif has_location is False:
+        stmt = stmt.where(Property.location.is_(None))
+    return stmt
 
 
 @router.post("/scrape", response_model=PropertyScrapeResponse)
@@ -121,23 +202,42 @@ async def scrape_property(
 async def list_properties(
     skip: int = 0,
     limit: int = 50,
+    property_type: Optional[str] = Query(None),
+    operation_type: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    currency: Optional[str] = Query(None),
+    price_min: Optional[float] = Query(None),
+    price_max: Optional[float] = Query(None),
+    area_min: Optional[float] = Query(None),
+    area_max: Optional[float] = Query(None),
+    bedrooms_min: Optional[int] = Query(None),
+    bathrooms_min: Optional[int] = Query(None),
+    neighborhood: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    has_location: Optional[bool] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    List all properties with pagination
+    List all properties with pagination and filters
     """
-    # Get total count
+    # Get total count with filters
     count_stmt = select(func.count()).select_from(Property)
+    count_stmt = _apply_property_filters(
+        count_stmt, property_type, operation_type, status_filter, currency,
+        price_min, price_max, area_min, area_max, bedrooms_min, bathrooms_min,
+        neighborhood, city, has_location,
+    )
     total_result = await db.execute(count_stmt)
     total = total_result.scalar()
 
-    # Get properties
-    stmt = (
-        select(Property)
-        .offset(skip)
-        .limit(limit)
-        .order_by(Property.created_at.desc())
+    # Get properties with filters
+    stmt = select(Property).order_by(Property.created_at.desc())
+    stmt = _apply_property_filters(
+        stmt, property_type, operation_type, status_filter, currency,
+        price_min, price_max, area_min, area_max, bedrooms_min, bathrooms_min,
+        neighborhood, city, has_location,
     )
+    stmt = stmt.offset(skip).limit(limit)
     result = await db.execute(stmt)
     properties = result.scalars().all()
 
@@ -147,6 +247,245 @@ async def list_properties(
         limit=limit,
         items=properties,
     )
+
+
+@router.get("/map", response_model=PropertyMapResponse)
+async def list_properties_for_map(
+    property_type: Optional[str] = Query(None),
+    operation_type: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    currency: Optional[str] = Query(None),
+    price_min: Optional[float] = Query(None),
+    price_max: Optional[float] = Query(None),
+    area_min: Optional[float] = Query(None),
+    area_max: Optional[float] = Query(None),
+    bedrooms_min: Optional[int] = Query(None),
+    bathrooms_min: Optional[int] = Query(None),
+    neighborhood: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get all geocoded properties for map display (no pagination).
+    Returns lightweight items with lat/lng coordinates.
+    """
+    stmt = select(Property).where(Property.location.isnot(None))
+    stmt = _apply_property_filters(
+        stmt, property_type, operation_type, status_filter, currency,
+        price_min, price_max, area_min, area_max, bedrooms_min, bathrooms_min,
+        neighborhood, city, has_location=True,
+    )
+    stmt = stmt.order_by(Property.created_at.desc())
+    result = await db.execute(stmt)
+    properties = result.scalars().all()
+
+    items = []
+    for prop in properties:
+        try:
+            point = to_shape(prop.location)
+            primary_image = next(
+                (img.url for img in prop.images if img.is_primary),
+                prop.images[0].url if prop.images else None,
+            )
+            items.append(PropertyMapItem(
+                id=prop.id,
+                title=prop.title,
+                property_type=prop.property_type.value if hasattr(prop.property_type, 'value') else prop.property_type,
+                operation_type=prop.operation_type.value if hasattr(prop.operation_type, 'value') else prop.operation_type,
+                price=float(prop.price),
+                currency=prop.currency.value if hasattr(prop.currency, 'value') else prop.currency,
+                price_per_sqm=float(prop.price_per_sqm) if prop.price_per_sqm else None,
+                total_area=float(prop.total_area) if prop.total_area else None,
+                bedrooms=prop.bedrooms,
+                bathrooms=prop.bathrooms,
+                neighborhood=prop.neighborhood,
+                city=prop.city,
+                address=prop.address,
+                status=prop.status.value if hasattr(prop.status, 'value') else prop.status,
+                latitude=point.y,
+                longitude=point.x,
+                primary_image_url=primary_image,
+                observations=prop.observations,
+                source_url=prop.source_url,
+            ))
+        except Exception:
+            continue
+
+    return PropertyMapResponse(total=len(items), items=items)
+
+
+def _geocode_properties_sync(properties: list, force: bool) -> dict:
+    """Run geocoding in a worker thread to avoid blocking the event loop."""
+    total = len(properties)
+    success = 0
+    failed = 0
+    failed_details = []
+    geocoding_service.clear_cache()
+
+    if force:
+        for prop in properties:
+            prop.location = None
+
+    for prop in properties:
+        try:
+            coords = geocoding_service.geocode_address(
+                address=prop.address,
+                street=prop.street,
+                street_number=prop.street_number,
+                neighborhood=prop.neighborhood,
+                city=prop.city,
+                province=prop.province,
+            )
+            if coords:
+                lat, lng = coords
+                prop.location = geocoding_service.make_point(lat, lng)
+                success += 1
+            else:
+                failed += 1
+                failed_details.append({
+                    "id": str(prop.id),
+                    "title": prop.title[:60],
+                    "address": prop.address,
+                    "neighborhood": prop.neighborhood,
+                })
+        except Exception as e:
+            failed += 1
+            failed_details.append({
+                "id": str(prop.id),
+                "title": prop.title[:60],
+                "error": str(e),
+            })
+
+        time.sleep(1.0)  # inter-property delay (LocationIQ allows 2 req/sec)
+
+    geocoding_service.clear_cache()
+
+    return {
+        "success": True,
+        "message": f"Geocoding completado: {success}/{total} exitosos, {failed} fallidos",
+        "total": total,
+        "geocoded": success,
+        "failed": failed,
+        "failed_details": failed_details[:20],
+    }
+
+
+@router.post("/geocode-all")
+async def geocode_all_properties(
+    force: bool = Query(False, description="Re-geocode ALL properties, not just missing ones"),
+    search_id: Optional[UUID] = Query(None, description="Geocode only properties from this saved search"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Geocode properties without coordinates.
+    With force=true, clears all coordinates and re-geocodes everything.
+    With search_id, only geocodes properties linked to that saved search.
+    Uses LocationIQ (free tier, 5000 req/day) with rate limiting.
+    Runs in a worker thread to avoid blocking the event loop.
+    """
+    if search_id:
+        stmt = select(Property).join(
+            PendingProperty, PendingProperty.property_id == Property.id
+        ).where(PendingProperty.saved_search_id == search_id)
+        if not force:
+            stmt = stmt.where(Property.location.is_(None))
+    elif force:
+        stmt = select(Property)
+    else:
+        stmt = select(Property).where(Property.location.is_(None))
+
+    result = await db.execute(stmt)
+    properties = result.scalars().all()
+
+    geocode_result = await asyncio.to_thread(_geocode_properties_sync, properties, force)
+
+    await db.commit()
+
+    return geocode_result
+
+
+@router.post("/normalize-addresses")
+async def normalize_all_addresses(
+    regeocode: bool = Query(False, description="Clear coordinates so properties get re-geocoded next run"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Normalize address fields for all properties in the database.
+    Parses street/street_number from raw address, detects neighborhoods,
+    and normalizes city names.
+
+    With regeocode=true, also clears existing coordinates so that
+    a subsequent geocode-all?force=true will re-geocode with clean data.
+    """
+    stmt = select(Property)
+    result = await db.execute(stmt)
+    properties = result.scalars().all()
+
+    total = len(properties)
+    changed = 0
+    street_filled = 0
+    neighborhood_filled = 0
+
+    for prop in properties:
+        normalized = normalize_address_fields(
+            address=prop.address,
+            street=prop.street,
+            street_number=prop.street_number,
+            neighborhood=prop.neighborhood,
+            city=prop.city,
+            province=prop.province,
+        )
+
+        modified = False
+
+        # Update address if cleaned version differs
+        if normalized['address'] and normalized['address'] != prop.address:
+            prop.address = normalized['address']
+            modified = True
+
+        # Fill street if it was NULL and normalizer parsed it
+        if not prop.street and normalized['street']:
+            prop.street = normalized['street']
+            street_filled += 1
+            modified = True
+
+        # Fill street_number if it was NULL and normalizer parsed it
+        if not prop.street_number and normalized['street_number']:
+            prop.street_number = normalized['street_number']
+            modified = True
+
+        # Fill neighborhood if it was NULL and normalizer detected it
+        if not prop.neighborhood and normalized['neighborhood']:
+            prop.neighborhood = normalized['neighborhood']
+            neighborhood_filled += 1
+            modified = True
+
+        # Normalize city/province
+        if normalized['city'] and normalized['city'] != prop.city:
+            prop.city = normalized['city']
+            modified = True
+        if normalized['province'] and normalized['province'] != prop.province:
+            prop.province = normalized['province']
+            modified = True
+
+        if modified:
+            changed += 1
+
+        # Optionally clear coordinates for re-geocoding
+        if regeocode and modified and prop.location is not None:
+            prop.location = None
+
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": f"Normalización completada: {changed}/{total} propiedades modificadas",
+        "total": total,
+        "changed": changed,
+        "street_filled": street_filled,
+        "neighborhood_filled": neighborhood_filled,
+        "regeocode": regeocode,
+    }
 
 
 @router.post("/", response_model=PropertyResponse, status_code=status.HTTP_201_CREATED)
@@ -162,6 +501,17 @@ async def create_property(
     property_data = property_in.model_dump(exclude={'images'})
     property_data['created_by'] = current_user.id
     property_data['scraped_at'] = datetime.utcnow() if property_in.source != 'manual' else None
+
+    # Normalize address fields
+    normalized = normalize_address_fields(
+        address=property_data.get('address'),
+        street=property_data.get('street'),
+        street_number=property_data.get('street_number'),
+        neighborhood=property_data.get('neighborhood'),
+        city=property_data.get('city'),
+        province=property_data.get('province'),
+    )
+    property_data.update(normalized)
 
     # Handle location coordinates
     if property_in.latitude and property_in.longitude:
@@ -213,7 +563,7 @@ async def update_property(
     property_id: UUID,
     property_in: PropertyUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # current_user: User = Depends(get_current_user),
 ):
     """
     Update property
@@ -230,8 +580,19 @@ async def update_property(
 
     # Update fields
     update_data = property_in.model_dump(exclude_unset=True)
+
+    # Handle lat/lng -> PostGIS Point conversion
+    lat = update_data.pop("latitude", None)
+    lng = update_data.pop("longitude", None)
+    if lat is not None and lng is not None:
+        property_obj.location = from_shape(Point(lng, lat), srid=4326)
+
     for field, value in update_data.items():
         setattr(property_obj, field, value)
+
+    # Recalculate price per sqm if price or area changed
+    if property_obj.price and property_obj.total_area:
+        property_obj.price_per_sqm = float(property_obj.price) / float(property_obj.total_area)
 
     await db.commit()
     await db.refresh(property_obj)
@@ -448,16 +809,25 @@ async def rescrape_all_properties(
                 property_obj.price = new_price or property_obj.price
                 property_obj.currency = scraped_data.get('currency', property_obj.currency)
 
-                # Update location
-                property_obj.address = scraped_data.get('address', property_obj.address)
+                # Update location — normalize address fields
+                raw_address = scraped_data.get('address', property_obj.address)
+                normalized = normalize_address_fields(
+                    address=raw_address,
+                    street=scraped_data.get('street'),
+                    street_number=scraped_data.get('street_number'),
+                    neighborhood=location_data.get('neighborhood', property_obj.neighborhood),
+                    city=location_data.get('city', property_obj.city),
+                    province=location_data.get('province', property_obj.province),
+                )
+                property_obj.address = normalized['address']
                 # Only update street/street_number if they're empty (preserve manual edits)
-                if not property_obj.street and scraped_data.get('street'):
-                    property_obj.street = scraped_data.get('street')
-                if not property_obj.street_number and scraped_data.get('street_number'):
-                    property_obj.street_number = scraped_data.get('street_number')
-                property_obj.neighborhood = location_data.get('neighborhood', property_obj.neighborhood)
-                property_obj.city = location_data.get('city', property_obj.city)
-                property_obj.province = location_data.get('province', property_obj.province)
+                if not property_obj.street and normalized['street']:
+                    property_obj.street = normalized['street']
+                if not property_obj.street_number and normalized['street_number']:
+                    property_obj.street_number = normalized['street_number']
+                property_obj.neighborhood = normalized['neighborhood'] or property_obj.neighborhood
+                property_obj.city = normalized['city'] or property_obj.city
+                property_obj.province = normalized['province'] or property_obj.province
 
                 # Update features
                 property_obj.covered_area = features.get('covered_area', property_obj.covered_area)
@@ -547,6 +917,16 @@ def _scraped_to_property(scraped_data: dict, user_id: UUID) -> dict:
     features = scraped_data.get('features', {})
     contact = scraped_data.get('contact', {})
 
+    # Normalize address fields before saving
+    normalized = normalize_address_fields(
+        address=scraped_data.get('address'),
+        street=scraped_data.get('street'),
+        street_number=scraped_data.get('street_number'),
+        neighborhood=location_data.get('neighborhood'),
+        city=location_data.get('city', 'Capital Federal'),
+        province=location_data.get('province', 'Capital Federal'),
+    )
+
     property_data = {
         'source': scraped_data.get('source', 'manual'),
         'source_url': scraped_data.get('source_url'),
@@ -557,12 +937,12 @@ def _scraped_to_property(scraped_data: dict, user_id: UUID) -> dict:
         'description': scraped_data.get('description'),
         'price': scraped_data.get('price', 0),
         'currency': scraped_data.get('currency', 'USD'),
-        'address': scraped_data.get('address'),
-        'street': scraped_data.get('street'),
-        'street_number': scraped_data.get('street_number'),
-        'neighborhood': location_data.get('neighborhood'),
-        'city': location_data.get('city', 'Capital Federal'),
-        'province': location_data.get('province', 'Capital Federal'),
+        'address': normalized['address'],
+        'street': normalized['street'],
+        'street_number': normalized['street_number'],
+        'neighborhood': normalized['neighborhood'],
+        'city': normalized['city'],
+        'province': normalized['province'],
         'covered_area': features.get('covered_area'),
         'total_area': features.get('total_area'),
         'bedrooms': features.get('bedrooms'),

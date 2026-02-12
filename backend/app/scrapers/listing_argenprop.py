@@ -576,11 +576,11 @@ class ArgenpropListingScraper(BaseListingScraper):
             except Exception:
                 continue
 
-        # Fallback: search for "Siguiente" / ">" links by text content
-        # (replaces invalid :contains() pseudo-selector)
+        # Fallback: search for "Siguiente" / "»" links by text content
+        # NOTE: '>' excluded — too many false positives in general HTML
         for a_tag in self.soup.select('a'):
             text = a_tag.get_text(strip=True).lower()
-            if text in ('siguiente', '>', 'next', '\u00bb'):
+            if text in ('siguiente', 'next', '\u00bb'):
                 return True
 
         # Check if there are more results indicated
@@ -634,7 +634,7 @@ class ArgenpropListingScraper(BaseListingScraper):
         return cards
 
     async def _enrich_cards_from_detail(
-        self, cards: List[Dict[str, Any]], max_details: int = 30
+        self, cards: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
         Fetch gallery images and location data for each property.
@@ -646,7 +646,7 @@ class ArgenpropListingScraper(BaseListingScraper):
         from .http_client import fetch_with_browser_fingerprint
 
         enriched = 0
-        to_enrich = cards[:max_details]
+        to_enrich = cards
         print(f"[DEBUG] [argenprop] Enriching {len(to_enrich)} cards...")
 
         for i, card in enumerate(to_enrich):

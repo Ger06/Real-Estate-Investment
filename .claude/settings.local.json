@@ -13,7 +13,11 @@
       "Bash(ls:*)",
       "Bash(dir \"%LOCALAPPDATA%\\\\Google\\\\Chrome\\\\User Data\\\\Default\" /b)",
       "Bash(tasklist:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(tasks \")",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build:*)",
+      "Bash(git add:*)"
     ]
   }
 }

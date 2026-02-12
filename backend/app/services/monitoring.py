@@ -23,6 +23,7 @@ from app.scrapers.listing_zonaprop import ZonapropListingScraper
 from app.scrapers.listing_remax import RemaxListingScraper
 from app.scrapers.listing_mercadolibre import MercadoLibreListingScraper
 from app.scrapers import ArgenpropScraper, ZonapropScraper, RemaxScraper, MercadoLibreScraper
+from app.services.address import normalize_address_fields
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,30 @@ class MonitoringService:
         "remax": RemaxScraper,
         "mercadolibre": MercadoLibreScraper,
     }
+
+    @staticmethod
+    def _try_geocode(property_obj) -> bool:
+        """Try to geocode a property if it has no location."""
+        if property_obj.location is not None:
+            return False
+        try:
+            from app.services.geocoding import geocoding_service
+            coords = geocoding_service.geocode_address(
+                address=property_obj.address,
+                street=property_obj.street,
+                street_number=property_obj.street_number,
+                neighborhood=property_obj.neighborhood,
+                city=property_obj.city,
+                province=property_obj.province,
+            )
+            if coords:
+                lat, lng = coords
+                property_obj.location = geocoding_service.make_point(lat, lng)
+                logger.info(f"Auto-geocoded '{property_obj.title[:50]}' -> ({lat}, {lng})")
+                return True
+        except Exception as e:
+            logger.warning(f"Auto-geocode failed for '{property_obj.title[:50]}': {e}")
+        return False
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -319,6 +344,16 @@ class MonitoringService:
         if not neighborhood and search.neighborhoods:
             neighborhood = search.neighborhoods[0]
 
+        # --- Normalize address fields ---
+        normalized = normalize_address_fields(
+            address=card_address,
+            street=None,  # cards never have street
+            street_number=None,  # cards never have street_number
+            neighborhood=neighborhood,
+            city=search.city or 'Buenos Aires',
+            province=search.province or 'Buenos Aires',
+        )
+
         # --- Build Property ---
         new_property = Property(
             source=source_enum,
@@ -331,10 +366,12 @@ class MonitoringService:
             price=price,
             currency=currency_enum,
             price_per_sqm=price_per_sqm,
-            address=card_address,
-            city=search.city or 'Buenos Aires',
-            province=search.province or 'Buenos Aires',
-            neighborhood=neighborhood,
+            address=normalized['address'],
+            street=normalized['street'],
+            street_number=normalized['street_number'],
+            city=normalized['city'],
+            province=normalized['province'],
+            neighborhood=normalized['neighborhood'] or neighborhood,
             covered_area=covered_area,
             semi_covered_area=card.get('semi_covered_area'),
             uncovered_area=card.get('uncovered_area'),
@@ -360,6 +397,7 @@ class MonitoringService:
 
         self.db.add(new_property)
         await self.db.flush()
+
         return new_property.id
 
     async def _process_discovered_property(
@@ -561,6 +599,16 @@ class MonitoringService:
         except ValueError:
             status_enum = PropertyStatus.ACTIVE
 
+        # Normalize address fields before saving
+        normalized = normalize_address_fields(
+            address=scraped_data.get('address'),
+            street=scraped_data.get('street'),
+            street_number=scraped_data.get('street_number'),
+            neighborhood=location_data.get('neighborhood'),
+            city=location_data.get('city', 'Capital Federal'),
+            province=location_data.get('province', 'Capital Federal'),
+        )
+
         property_data = {
             'source': source_enum,
             'source_url': scraped_data.get('source_url'),
@@ -571,12 +619,12 @@ class MonitoringService:
             'description': scraped_data.get('description'),
             'price': scraped_data.get('price', 0),
             'currency': currency_enum,
-            'address': scraped_data.get('address'),
-            'street': scraped_data.get('street'),
-            'street_number': scraped_data.get('street_number'),
-            'neighborhood': location_data.get('neighborhood'),
-            'city': location_data.get('city', 'Capital Federal'),
-            'province': location_data.get('province', 'Capital Federal'),
+            'address': normalized['address'],
+            'street': normalized['street'],
+            'street_number': normalized['street_number'],
+            'neighborhood': normalized['neighborhood'],
+            'city': normalized['city'],
+            'province': normalized['province'],
             'covered_area': features.get('covered_area'),
             'semi_covered_area': features.get('semi_covered_area'),
             'total_area': features.get('total_area'),

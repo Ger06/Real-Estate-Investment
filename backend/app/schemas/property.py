@@ -112,6 +112,8 @@ class PropertyUpdate(BaseModel):
     bathrooms: Optional[int] = None
     parking_spaces: Optional[int] = None
     amenities: Optional[Dict[str, Any]] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 # Response Schemas
@@ -189,3 +191,36 @@ class PropertyListResponse(BaseModel):
     skip: int
     limit: int
     items: List[PropertyResponse]
+
+
+# Map Schemas
+class PropertyMapItem(BaseModel):
+    """Lightweight schema for map markers"""
+    id: UUID
+    title: str
+    property_type: str
+    operation_type: str
+    price: float
+    currency: str
+    price_per_sqm: Optional[float] = None
+    total_area: Optional[float] = None
+    bedrooms: Optional[int] = None
+    bathrooms: Optional[int] = None
+    neighborhood: Optional[str] = None
+    city: str
+    address: Optional[str] = None
+    status: str
+    latitude: float
+    longitude: float
+    primary_image_url: Optional[str] = None
+    observations: Optional[str] = None
+    source_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PropertyMapResponse(BaseModel):
+    """Map response with all geocoded properties"""
+    total: int
+    items: List[PropertyMapItem]

@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     SCRAPING_RATE_LIMIT: int = 2  # requests per second
     SCRAPING_TIMEOUT: int = 30  # seconds
 
+    # Geocoding (LocationIQ - free tier 5000 req/day, 2 req/sec)
+    LOCATIONIQ_API_KEY: str = ""
+    GEOCODING_TIMEOUT: int = 10
+    GEOCODING_COUNTRY_BIAS: str = "AR"
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # or "console"

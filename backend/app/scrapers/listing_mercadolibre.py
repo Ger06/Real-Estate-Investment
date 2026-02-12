@@ -29,6 +29,7 @@ propiedad individualmente para extraer:
   - Descripción completa
   - Dirección y barrio
 """
+import asyncio
 import json
 import os
 import re
@@ -370,33 +371,32 @@ class MercadoLibreListingScraper(BaseListingScraper):
     # ── Page fetching & scraping ───────────────────────────────────
 
     async def fetch_page(self, url: str) -> str:
-        """Fetch page using Selenium for JavaScript-rendered content"""
-        # MercadoLibre detection works better without headless mode
+        """Fetch page using Selenium in a thread pool to avoid blocking the event loop."""
+        return await asyncio.to_thread(self._fetch_page_sync, url)
+
+    def _fetch_page_sync(self, url: str) -> str:
+        """Synchronous Selenium fetch — runs in a worker thread."""
         driver = self._get_driver(headless=False)
 
         try:
             print(f"[DEBUG] [mercadolibre] Selenium loading: {url}")
             driver.get(url)
 
-            # Wait for page to load
             WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
 
-            # Wait for content to render (MercadoLibre loads content dynamically)
             time.sleep(5)
 
             # Check if we got a verification page (bot detection)
             page_source = driver.page_source
             if 'account-verification' in page_source or 'message-code' in page_source:
                 print("[DEBUG] [mercadolibre] Bot detection triggered - verification page shown")
-                # Try scrolling to trigger lazy loading
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
                 time.sleep(2)
                 driver.execute_script("window.scrollTo(0, 0);")
                 time.sleep(2)
 
-            # Try multiple selectors for listing cards
             card_selectors = [
                 'a[href*="mercadolibre.com.ar/MLA"]',
                 'a[href*="/MLA-"]',
@@ -421,7 +421,6 @@ class MercadoLibreListingScraper(BaseListingScraper):
                     continue
 
             if not found_cards:
-                # Check if ML redirected to login page
                 current_url = driver.current_url
                 is_login = (
                     'login' in current_url
@@ -431,10 +430,9 @@ class MercadoLibreListingScraper(BaseListingScraper):
                 )
                 if is_login:
                     print("[INFO] [mercadolibre] Login page detected.")
-                    print("[INFO] [mercadolibre] Please log in in the browser window. Waiting up to 2 minutes...")
-                    # Wait for user to complete login (check every 3s, up to 2 min)
+                    print("[INFO] [mercadolibre] Please log in in the browser window. Waiting up to 30 seconds...")
                     logged_in = False
-                    for _ in range(40):
+                    for _ in range(10):  # 10 * 3s = 30s (was 40 * 3s = 2min)
                         time.sleep(3)
                         current_url = driver.current_url
                         if 'login' not in current_url and 'auth.' not in current_url and 'verification' not in current_url:
@@ -444,7 +442,6 @@ class MercadoLibreListingScraper(BaseListingScraper):
                         print("[INFO] [mercadolibre] Login successful! Re-loading search page...")
                         driver.get(url)
                         time.sleep(5)
-                        # Try to find cards again after login
                         for selector in card_selectors:
                             try:
                                 WebDriverWait(driver, 3).until(
@@ -458,7 +455,7 @@ class MercadoLibreListingScraper(BaseListingScraper):
                             except Exception:
                                 continue
                     else:
-                        print("[WARN] [mercadolibre] Login timeout (2 min). Continuing anyway...")
+                        print("[WARN] [mercadolibre] Login timeout (30s). Continuing anyway...")
                 else:
                     print("[DEBUG] [mercadolibre] No listing cards found with any selector")
                     time.sleep(3)
@@ -476,8 +473,9 @@ class MercadoLibreListingScraper(BaseListingScraper):
         try:
             cards = await super().scrape_all_pages(max_properties)
             # Enrich cards with images and features from detail pages
+            # Run in thread to avoid blocking the event loop with Selenium
             if cards and self.driver:
-                cards = self._enrich_cards_from_detail(cards)
+                cards = await asyncio.to_thread(self._enrich_cards_from_detail, cards)
             return cards
         finally:
             self._close_driver()
@@ -692,7 +690,7 @@ class MercadoLibreListingScraper(BaseListingScraper):
     # ── Detail page enrichment ─────────────────────────────────────
 
     def _enrich_cards_from_detail(
-        self, cards: List[Dict[str, Any]], max_details: int = 20
+        self, cards: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
         Visit each property's detail page to extract all images and features.
@@ -701,7 +699,7 @@ class MercadoLibreListingScraper(BaseListingScraper):
         have the full image gallery, surface areas, and other features.
         """
         enriched = 0
-        to_enrich = cards[:max_details]
+        to_enrich = cards
         print(f"[DEBUG] [mercadolibre] Enriching {len(to_enrich)} cards from detail pages...")
 
         for i, card in enumerate(to_enrich):

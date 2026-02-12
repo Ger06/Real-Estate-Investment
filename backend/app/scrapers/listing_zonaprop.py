@@ -420,10 +420,10 @@ class ZonapropListingScraper(BaseListingScraper):
         try:
             cards = await super().scrape_all_pages(max_properties)
             # Enrich cards with images and features from detail pages
+            # Run in thread to avoid blocking the event loop with Selenium
             if cards:
-                # Create driver if not already created (curl_cffi may have been used for search)
                 self._get_driver()
-                cards = self._enrich_cards_from_detail(cards)
+                cards = await asyncio.to_thread(self._enrich_cards_from_detail, cards)
             return cards
         finally:
             self._close_driver()
@@ -805,7 +805,7 @@ class ZonapropListingScraper(BaseListingScraper):
     # ── Detail page enrichment ─────────────────────────────────────
 
     def _enrich_cards_from_detail(
-        self, cards: List[Dict[str, Any]], max_details: int = 30
+        self, cards: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
         Visit each property's detail page to extract all images and features.
@@ -816,7 +816,7 @@ class ZonapropListingScraper(BaseListingScraper):
         import time
 
         enriched = 0
-        to_enrich = cards[:max_details]
+        to_enrich = cards
         print(f"[DEBUG] [zonaprop] Enriching {len(to_enrich)} cards from detail pages...")
 
         # Warm up: visit homepage first to get Cloudflare cookies

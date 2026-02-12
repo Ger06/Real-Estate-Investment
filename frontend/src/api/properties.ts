@@ -94,6 +94,72 @@ export interface RescrapeAllResponse {
   error_count: number;
 }
 
+export interface PropertyFilters {
+  property_type?: string;
+  operation_type?: string;
+  status?: string;
+  currency?: string;
+  price_min?: number;
+  price_max?: number;
+  area_min?: number;
+  area_max?: number;
+  bedrooms_min?: number;
+  bathrooms_min?: number;
+  neighborhood?: string;
+  city?: string;
+  has_location?: boolean;
+}
+
+export interface PropertyMapItem {
+  id: string;
+  title: string;
+  property_type: string;
+  operation_type: string;
+  price: number;
+  currency: string;
+  price_per_sqm?: number;
+  total_area?: number;
+  bedrooms?: number;
+  bathrooms?: number;
+  neighborhood?: string;
+  city: string;
+  address?: string;
+  status: string;
+  latitude: number;
+  longitude: number;
+  primary_image_url?: string;
+  observations?: string;
+  source_url?: string;
+}
+
+export interface PropertyMapResponse {
+  total: number;
+  items: PropertyMapItem[];
+}
+
+export interface GeocodeResponse {
+  success: boolean;
+  message: string;
+  total: number;
+  geocoded: number;
+  failed: number;
+  failed_details?: Array<{
+    id: string;
+    title: string;
+    address?: string;
+    neighborhood?: string;
+    error?: string;
+  }>;
+}
+
+export interface PropertyUpdateData {
+  price?: number;
+  status?: string;
+  observations?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
 export const propertiesApi = {
   scrapeProperty: async (data: PropertyScrapeRequest): Promise<PropertyScrapeResponse> => {
     const response = await apiClient.post<PropertyScrapeResponse>('/properties/scrape', data);
@@ -119,6 +185,41 @@ export const propertiesApi = {
 
   rescrapeAll: async (): Promise<RescrapeAllResponse> => {
     const response = await apiClient.post<RescrapeAllResponse>('/properties/rescrape-all');
+    return response.data;
+  },
+
+  listPropertiesForMap: async (filters: PropertyFilters = {}): Promise<PropertyMapResponse> => {
+    const params: Record<string, string | number | boolean> = {};
+    if (filters.property_type) params.property_type = filters.property_type;
+    if (filters.operation_type) params.operation_type = filters.operation_type;
+    if (filters.status) params.status = filters.status;
+    if (filters.currency) params.currency = filters.currency;
+    if (filters.price_min != null) params.price_min = filters.price_min;
+    if (filters.price_max != null) params.price_max = filters.price_max;
+    if (filters.area_min != null) params.area_min = filters.area_min;
+    if (filters.area_max != null) params.area_max = filters.area_max;
+    if (filters.bedrooms_min != null) params.bedrooms_min = filters.bedrooms_min;
+    if (filters.bathrooms_min != null) params.bathrooms_min = filters.bathrooms_min;
+    if (filters.neighborhood) params.neighborhood = filters.neighborhood;
+    if (filters.city) params.city = filters.city;
+    const response = await apiClient.get<PropertyMapResponse>('/properties/map', { params });
+    return response.data;
+  },
+
+  updateProperty: async (id: string, data: PropertyUpdateData): Promise<Property> => {
+    const response = await apiClient.put<Property>(`/properties/${id}`, data);
+    return response.data;
+  },
+
+  geocodeAll: async (): Promise<GeocodeResponse> => {
+    const response = await apiClient.post('/properties/geocode-all');
+    return response.data;
+  },
+
+  geocodeBySearch: async (searchId: string): Promise<GeocodeResponse> => {
+    const response = await apiClient.post('/properties/geocode-all', null, {
+      params: { search_id: searchId },
+    });
     return response.data;
   },
 };
