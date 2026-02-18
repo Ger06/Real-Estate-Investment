@@ -2,6 +2,8 @@
 
 Plataforma profesional para análisis de inversión inmobiliaria con scraping de portales, gestión de costos de construcción y análisis de rentabilidad.
 
+**Sitio Web:** [https://real-estate-investment-theta.vercel.app/](https://real-estate-investment-theta.vercel.app/)
+
 ## 🏗️ Arquitectura
 
 - **Backend**: FastAPI + PostgreSQL (PostGIS) + Celery + Redis
@@ -217,3 +219,4 @@ Privado - Todos los derechos reservados
 ## 👤 Autor
 
 Desarrollado como proyecto profesional de análisis inmobiliario.
+
