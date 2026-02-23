@@ -19,7 +19,11 @@ import {
   ListItemIcon,
   ListItemText,
   Divider,
+  Snackbar,
+  Pagination,
+  Select,
 } from '@mui/material';
+import type { SelectChangeEvent } from '@mui/material/Select';
 import {
   Search as SearchIcon,
   Home as HomeIcon,
@@ -28,21 +32,31 @@ import {
   PriceChange as PriceChangeIcon,
   Cached as CachedIcon,
   ArrowDropDown as ArrowDropDownIcon,
+  ChevronRight as ChevronRightIcon,
+  FilterList as FilterListIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
-import { propertiesApi } from '../../api/properties';
+import { propertiesApi, type Property, type PropertyFilters } from '../../api/properties';
 import { useProperties } from '../../hooks/useProperties';
+import UpdatePriceDialog from './UpdatePriceDialog';
+import PropertyFilterPanel from './PropertyFilterPanel';
+
+const PAGE_SIZE = 25;
 
 export default function PropertyList() {
   const navigate = useNavigate();
 
-  // React Query hook - reemplaza useState + useEffect + loadProperties
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE);
+  const [activeFilters, setActiveFilters] = useState<PropertyFilters>({});
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
   const {
     data,
     isLoading,
     error: queryError,
     refetch
-  } = useProperties(0, 50);
+  } = useProperties((page - 1) * pageSize, pageSize, activeFilters);
 
   const [actionError, setActionError] = useState('');
 
@@ -50,8 +64,17 @@ export default function PropertyList() {
   const total = data?.total || 0;
   const error = queryError?.message || actionError || '';
 
+  const [updatePriceProperty, setUpdatePriceProperty] = useState<Property | null>(null);
+
   const [updateMenuAnchor, setUpdateMenuAnchor] = useState<null | HTMLElement>(null);
+  const [pricesSubMenuAnchor, setPricesSubMenuAnchor] = useState<null | HTMLElement>(null);
+  const [rescrapeSubMenuAnchor, setRescrapeSubMenuAnchor] = useState<null | HTMLElement>(null);
   const [updating, setUpdating] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
+
+  const activeFilterCount = Object.values(activeFilters).filter(
+    (v) => v != null && v !== ''
+  ).length;
 
   // Portal colors
   const getPortalColor = (source: string) => {
@@ -89,38 +112,35 @@ export default function PropertyList() {
     setUpdateMenuAnchor(null);
   };
 
-  // Opción 1: Refrescar vista (simplemente recarga desde BD)
+  const closeAllMenus = () => {
+    setUpdateMenuAnchor(null);
+    setPricesSubMenuAnchor(null);
+    setRescrapeSubMenuAnchor(null);
+  };
+
   const handleRefreshView = async () => {
     handleUpdateMenuClose();
     await refetch();
   };
 
-  // Opción 2: Actualizar precios desde portales
-  const handleUpdatePrices = async () => {
-    handleUpdateMenuClose();
+  const handleUpdatePrices = async (portal?: string) => {
+    closeAllMenus();
     try {
       setUpdating(true);
       setActionError('');
 
-      const response = await propertiesApi.updateAllPrices();
+      const response = await propertiesApi.updateAllPrices(portal);
 
       if (response.success) {
-        // Mostrar detalles de los cambios de precio
+        let msg = response.message;
         if (response.price_changes && response.price_changes.length > 0) {
-          const changes = response.price_changes
-            .map(
-              (change) =>
-                `${change.title}: ${change.old_price} → ${change.new_price} (${change.change_percentage > 0 ? '+' : ''}${change.change_percentage}%)`
-            )
-            .join('\n');
-
-          alert(
-            `${response.message}\n\nCambios de precio:\n${changes}`
-          );
-        } else {
-          alert(response.message);
+          const sample = response.price_changes
+            .slice(0, 3)
+            .map((c) => `${c.title.slice(0, 40)}: ${c.old_price} → ${c.new_price}`)
+            .join(' | ');
+          msg += ` — ${sample}`;
         }
-
+        setSuccessMessage(msg);
         await refetch();
       } else {
         setActionError(response.message);
@@ -132,12 +152,12 @@ export default function PropertyList() {
     }
   };
 
-  // Opción 3: Re-scrapear todas las propiedades
-  const handleRescrapeAll = async () => {
-    handleUpdateMenuClose();
+  const handleRescrapeAll = async (portal?: string) => {
+    closeAllMenus();
 
+    const portalLabel = portal ? ` de ${portal}` : '';
     const confirmed = window.confirm(
-      `¿Estás seguro de que querés re-scrapear todas las ${total} propiedades? Esto puede tomar varios minutos.`
+      `¿Estás seguro de que querés re-scrapear las propiedades${portalLabel}? Esto puede tomar varios minutos.`
     );
 
     if (!confirmed) return;
@@ -146,10 +166,14 @@ export default function PropertyList() {
       setUpdating(true);
       setActionError('');
 
-      const response = await propertiesApi.rescrapeAll();
+      const response = await propertiesApi.rescrapeAll(portal);
 
       if (response.success) {
-        alert(response.message);
+        let msg = `Re-scraping: ${response.total_properties} encontradas, ${response.updated_count} actualizadas, ${response.error_count} errores`;
+        if (response.errors && response.errors.length > 0) {
+          msg += ` | ${response.errors.slice(0, 3).join(', ')}`;
+        }
+        setSuccessMessage(msg);
         await refetch();
       } else {
         setActionError(response.message);
@@ -161,16 +185,34 @@ export default function PropertyList() {
     }
   };
 
+  const handleApplyFilters = (filters: PropertyFilters) => {
+    setActiveFilters(filters);
+    setPage(1);
+  };
+
+  const handlePageSizeChange = (e: SelectChangeEvent) => {
+    setPageSize(Number(e.target.value));
+    setPage(1);
+  };
+
   return (
     <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
         <Box>
           <Typography variant="h4">Propiedades</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             {total} {total === 1 ? 'propiedad registrada' : 'propiedades registradas'}
           </Typography>
         </Box>
-        <Box sx={{ display: 'flex', gap: 2 }}>
+        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Button
+            variant="outlined"
+            startIcon={<FilterListIcon />}
+            onClick={() => setFiltersOpen((v) => !v)}
+            color={activeFilterCount > 0 ? 'primary' : 'inherit'}
+          >
+            Filtros{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+          </Button>
           <Button
             variant="outlined"
             startIcon={<RefreshIcon />}
@@ -195,24 +237,58 @@ export default function PropertyList() {
               />
             </MenuItem>
             <Divider />
-            <MenuItem onClick={handleUpdatePrices}>
+            <MenuItem onClick={(e) => setPricesSubMenuAnchor(e.currentTarget)}>
               <ListItemIcon>
                 <PriceChangeIcon fontSize="small" />
               </ListItemIcon>
               <ListItemText
-                primary="Actualizar precios desde portales"
+                primary="Actualizar precios"
                 secondary="Verificar cambios de precio en cada portal"
               />
+              <ChevronRightIcon fontSize="small" sx={{ ml: 1 }} />
             </MenuItem>
-            <MenuItem onClick={handleRescrapeAll}>
+            <MenuItem onClick={(e) => setRescrapeSubMenuAnchor(e.currentTarget)}>
               <ListItemIcon>
                 <CachedIcon fontSize="small" />
               </ListItemIcon>
               <ListItemText
-                primary="Re-scrapear todas"
+                primary="Re-scrapear todo"
                 secondary="Actualizar toda la información de cada propiedad"
               />
+              <ChevronRightIcon fontSize="small" sx={{ ml: 1 }} />
             </MenuItem>
+          </Menu>
+
+          {/* Submenú: Actualizar precios por portal */}
+          <Menu
+            anchorEl={pricesSubMenuAnchor}
+            open={Boolean(pricesSubMenuAnchor)}
+            onClose={() => setPricesSubMenuAnchor(null)}
+            anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+          >
+            <MenuItem onClick={() => handleUpdatePrices()}>Todos los portales</MenuItem>
+            <Divider />
+            <MenuItem onClick={() => handleUpdatePrices('argenprop')}>Argenprop</MenuItem>
+            <MenuItem onClick={() => handleUpdatePrices('zonaprop')}>Zonaprop</MenuItem>
+            <MenuItem onClick={() => handleUpdatePrices('remax')}>Remax</MenuItem>
+            <MenuItem onClick={() => handleUpdatePrices('mercadolibre')}>MercadoLibre</MenuItem>
+          </Menu>
+
+          {/* Submenú: Re-scrapear por portal */}
+          <Menu
+            anchorEl={rescrapeSubMenuAnchor}
+            open={Boolean(rescrapeSubMenuAnchor)}
+            onClose={() => setRescrapeSubMenuAnchor(null)}
+            anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+          >
+            <MenuItem onClick={() => handleRescrapeAll()}>Todos los portales</MenuItem>
+            <Divider />
+            <MenuItem onClick={() => handleRescrapeAll('argenprop')}>Argenprop</MenuItem>
+            <MenuItem onClick={() => handleRescrapeAll('zonaprop')}>Zonaprop</MenuItem>
+            <MenuItem onClick={() => handleRescrapeAll('remax')}>Remax</MenuItem>
+            <MenuItem onClick={() => handleRescrapeAll('mercadolibre')}>MercadoLibre</MenuItem>
           </Menu>
           <Button
             variant="outlined"
@@ -228,11 +304,16 @@ export default function PropertyList() {
           >
             Scrapear Propiedad
           </Button>
-          {/*<Button variant="contained" startIcon={<AddIcon />}>
-            Nueva Propiedad
-          </Button>*/}
         </Box>
       </Box>
+
+      {/* Filter panel */}
+      <PropertyFilterPanel
+        open={filtersOpen}
+        filters={activeFilters}
+        onApply={handleApplyFilters}
+        totalResults={total}
+      />
 
       {error && (
         <Alert severity="error" sx={{ mb: 3 }}>
@@ -323,6 +404,43 @@ export default function PropertyList() {
                   <Typography variant="h5" color="primary" gutterBottom>
                     {formatCurrency(property.price, property.currency)}
                   </Typography>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<PriceChangeIcon />}
+                    onClick={(e) => { e.stopPropagation(); setUpdatePriceProperty(property); }}
+                    sx={{ mb: 1 }}
+                  >
+                    Actualizar precio
+                  </Button>
+
+                  {property.price_history?.length > 0 && (() => {
+                    const last = [...property.price_history]
+                      .sort((a, b) => new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime())[0];
+                    if (!last.previous_price || !last.change_percentage) return null;
+                    const isDown = last.change_percentage < 0;
+                    return (
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 0.5 }}>
+                        <Chip
+                          label={`${isDown ? '' : '+'}${last.change_percentage.toFixed(1)}%`}
+                          size="small"
+                          sx={{
+                            bgcolor: isDown ? 'success.light' : 'error.light',
+                            color: isDown ? 'success.dark' : 'error.dark',
+                            fontWeight: 600,
+                          }}
+                        />
+                        <Box>
+                          <Typography variant="caption" color="text.secondary">
+                            antes {last.currency} {last.previous_price.toLocaleString('es-AR')}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            Últ. cambio: {formatDate(last.recorded_at)}
+                          </Typography>
+                        </Box>
+                      </Box>
+                    );
+                  })()}
 
                   {property.price_per_sqm && (
                     <Typography variant="body2" color="text.secondary">
@@ -361,6 +479,47 @@ export default function PropertyList() {
           ))}
         </Grid>
       )}
+
+      {/* Pagination */}
+      {total > 0 && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', mt: 3, gap: 2 }}>
+          <Pagination
+            count={Math.ceil(total / pageSize)}
+            page={page}
+            onChange={(_, p) => setPage(p)}
+            color="primary"
+          />
+          <Select
+            size="small"
+            value={String(pageSize)}
+            onChange={handlePageSizeChange}
+          >
+            <MenuItem value="25">25 por página</MenuItem>
+            <MenuItem value="50">50 por página</MenuItem>
+            <MenuItem value="100">100 por página</MenuItem>
+          </Select>
+        </Box>
+      )}
+
+      {updatePriceProperty && (
+        <UpdatePriceDialog
+          open={Boolean(updatePriceProperty)}
+          onClose={() => setUpdatePriceProperty(null)}
+          property={updatePriceProperty}
+          onSuccess={() => { setUpdatePriceProperty(null); refetch(); }}
+        />
+      )}
+
+      <Snackbar
+        open={Boolean(successMessage)}
+        autoHideDuration={7000}
+        onClose={() => setSuccessMessage('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert onClose={() => setSuccessMessage('')} severity="success" sx={{ width: '100%' }}>
+          {successMessage}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }

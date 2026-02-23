@@ -27,6 +27,7 @@ import {
   Visibility as ViewIcon,
   ToggleOn as ToggleOnIcon,
   ToggleOff as ToggleOffIcon,
+  MyLocation as MyLocationIcon,
 } from '@mui/icons-material';
 import {
   useSavedSearches,
@@ -35,8 +36,10 @@ import {
   useDeleteSearch,
   useExecuteSearch,
   useToggleSearch,
+  useGeocodeBySearch,
 } from '../../hooks/useSavedSearches';
 import type { SavedSearch, SavedSearchExecuteResponse } from '../../api/savedSearches';
+import type { GeocodeResponse } from '../../api/properties';
 import SavedSearchForm from './SavedSearchForm';
 
 const PORTAL_COLORS: Record<string, 'success' | 'warning' | 'error' | 'default'> = {
@@ -83,12 +86,15 @@ export default function SavedSearchList() {
   const deleteMutation = useDeleteSearch();
   const executeMutation = useExecuteSearch();
   const toggleMutation = useToggleSearch();
+  const geocodeMutation = useGeocodeBySearch();
 
   const [formOpen, setFormOpen] = useState(false);
   const [editSearch, setEditSearch] = useState<SavedSearch | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<SavedSearch | null>(null);
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [executeResult, setExecuteResult] = useState<SavedSearchExecuteResponse | null>(null);
+  const [geocodingId, setGeocodingId] = useState<string | null>(null);
+  const [geocodeResult, setGeocodeResult] = useState<GeocodeResponse | null>(null);
   const [actionError, setActionError] = useState('');
 
   const searches = data?.items || [];
@@ -154,6 +160,20 @@ export default function SavedSearchList() {
     }
   };
 
+  const handleGeocode = async (search: SavedSearch) => {
+    try {
+      setActionError('');
+      setGeocodeResult(null);
+      setGeocodingId(search.id);
+      const result = await geocodeMutation.mutateAsync(search.id);
+      setGeocodeResult(result);
+    } catch (err: any) {
+      setActionError(err.response?.data?.detail || 'Error al geocodificar propiedades');
+    } finally {
+      setGeocodingId(null);
+    }
+  };
+
   const formLoading = createMutation.isPending || updateMutation.isPending;
 
   return (
@@ -194,6 +214,22 @@ export default function SavedSearchList() {
               Errores: {executeResult.errors.length}
             </Typography>
           )}
+        </Alert>
+      )}
+
+      {geocodeResult && (
+        <Alert
+          severity={geocodeResult.failed > 0 ? 'warning' : 'success'}
+          sx={{ mb: 2 }}
+          onClose={() => setGeocodeResult(null)}
+        >
+          <Typography variant="subtitle2" gutterBottom>
+            Geocodificacion completada
+          </Typography>
+          <Typography variant="body2">
+            Total: {geocodeResult.total} | Geocodificadas: {geocodeResult.geocoded} |
+            Fallidas: {geocodeResult.failed}
+          </Typography>
         </Alert>
       )}
 
@@ -325,6 +361,22 @@ export default function SavedSearchList() {
                       >
                         {search.is_active ? <ToggleOnIcon /> : <ToggleOffIcon />}
                       </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Geocodificar propiedades">
+                      <span>
+                        <IconButton
+                          color="info"
+                          onClick={() => handleGeocode(search)}
+                          disabled={geocodingId === search.id}
+                          size="small"
+                        >
+                          {geocodingId === search.id ? (
+                            <CircularProgress size={20} />
+                          ) : (
+                            <MyLocationIcon />
+                          )}
+                        </IconButton>
+                      </span>
                     </Tooltip>
                     <Tooltip title="Editar">
                       <IconButton onClick={() => handleEdit(search)} size="small">

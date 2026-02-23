@@ -11,6 +11,8 @@ import {
   type PendingPropertyScrapeResponse,
   type PendingPropertyActionResponse,
 } from '../api/savedSearches';
+import { propertiesApi } from '../api/properties';
+import type { GeocodeResponse } from '../api/properties';
 
 // ── Queries ─────────────────────────────────────────────────────────
 
@@ -159,6 +161,17 @@ export const useDeletePending = () => {
       queryClient.invalidateQueries({ queryKey: ['pendingProperties'] });
       queryClient.invalidateQueries({ queryKey: ['pendingStats'] });
       queryClient.invalidateQueries({ queryKey: ['savedSearches'] });
+    },
+  });
+};
+
+export const useGeocodeBySearch = () => {
+  const queryClient = useQueryClient();
+  return useMutation<GeocodeResponse, Error, string>({
+    mutationFn: (searchId: string) => propertiesApi.geocodeBySearch(searchId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['savedSearches'] });
+      queryClient.invalidateQueries({ queryKey: ['properties'] });
     },
   });
 };

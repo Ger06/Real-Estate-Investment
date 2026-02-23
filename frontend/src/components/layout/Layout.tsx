@@ -21,6 +21,7 @@ import {
   Menu as MenuIcon,
   Dashboard as DashboardIcon,
   Home as HomeIcon,
+  Map as MapIcon,
   Assessment as AssessmentIcon,
   AttachMoney as MoneyIcon,
   Search as SearchIcon,
@@ -47,6 +48,7 @@ export default function Layout() {
   const menuItems = [
     { text: 'Dashboard', icon: <DashboardIcon />, path: '/' },
     { text: 'Propiedades', icon: <HomeIcon />, path: '/properties' },
+    { text: 'Mapa', icon: <MapIcon />, path: '/properties/map' },
     { text: 'Búsquedas', icon: <SearchIcon />, path: '/saved-searches' },
     { text: 'Análisis', icon: <AssessmentIcon />, path: '/analytics' },
     { text: 'Inversiones', icon: <MoneyIcon />, path: '/investments' },

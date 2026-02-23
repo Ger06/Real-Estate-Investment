@@ -2,10 +2,11 @@
 HTTP Client with browser TLS fingerprint impersonation.
 
 Uses curl_cffi to bypass Cloudflare and similar TLS fingerprint checks.
-Falls back to httpx if curl_cffi is not available.
+Falls back to httpx for non-CF sites.
 
 This module is the single source of truth for HTTP fetching across all scrapers.
 """
+import asyncio
 import logging
 from typing import Optional
 
@@ -43,6 +44,15 @@ BROWSER_HEADERS = {
     "Priority": "u=0, i",
 }
 
+# Markers that indicate a Cloudflare challenge/block page
+CF_BLOCK_MARKERS = [
+    'cf-browser-verification',
+    'Just a moment',
+    'Checking your browser',
+    'Attention Required',
+    'Access denied',
+]
+
 
 def _decode_content(content: bytes) -> str:
     """Decode bytes to string with UTF-8, falling back to Latin-1."""
@@ -52,22 +62,32 @@ def _decode_content(content: bytes) -> str:
         return content.decode('latin-1')
 
 
+def _is_cf_blocked(html: str) -> bool:
+    """Check if HTML content is a Cloudflare challenge/block page."""
+    return any(marker in html for marker in CF_BLOCK_MARKERS)
+
+
 async def fetch_with_browser_fingerprint(
     url: str,
     user_agent: Optional[str] = None,
     timeout: float = 30.0,
+    max_retries: int = 2,
 ) -> str:
     """
     Fetch a URL using browser TLS fingerprint impersonation.
 
     Strategy:
     1. curl_cffi with Chrome impersonation (bypasses Cloudflare TLS checks)
-    2. httpx with realistic browser headers (fallback)
+    2. httpx with realistic browser headers (fallback for non-CF sites)
+
+    Retries transient errors (connection, timeout) up to max_retries times
+    with exponential backoff.
 
     Args:
         url: URL to fetch
         user_agent: Optional custom User-Agent string
         timeout: Request timeout in seconds
+        max_retries: Maximum retry attempts for transient errors
 
     Returns:
         HTML content as string
@@ -77,7 +97,35 @@ async def fetch_with_browser_fingerprint(
     """
     ua = user_agent or DEFAULT_USER_AGENT
     headers = {**BROWSER_HEADERS, "User-Agent": ua}
+    last_exception = None
 
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await _fetch_once(url, headers, timeout)
+        except Exception as e:
+            last_exception = e
+            # Only retry on transient errors (connection, timeout)
+            err_str = str(e).lower()
+            is_transient = any(kw in err_str for kw in [
+                'timeout', 'timed out', 'connection', 'connect',
+                'reset', 'refused', 'network', 'temporary',
+            ])
+            if not is_transient or attempt == max_retries:
+                raise
+            backoff = 2 ** (attempt - 1)  # 1s, 2s
+            logger.info(f"Retrying {url} in {backoff}s (attempt {attempt}/{max_retries}): {e}")
+            await asyncio.sleep(backoff)
+
+    # Should not reach here, but just in case
+    raise last_exception  # type: ignore[misc]
+
+
+async def _fetch_once(
+    url: str,
+    headers: dict,
+    timeout: float,
+) -> str:
+    """Single fetch attempt with curl_cffi -> httpx fallback chain."""
     # Method 1: curl_cffi with Chrome TLS fingerprint
     # Try multiple impersonation profiles — different Cloudflare configs block different fingerprints
     if HAS_CURL_CFFI:
@@ -94,7 +142,7 @@ async def fetch_with_browser_fingerprint(
                 )
                 if response.status_code == 200 and len(response.content) > 1000:
                     html = _decode_content(response.content)
-                    if 'cf-browser-verification' not in html:
+                    if not _is_cf_blocked(html):
                         logger.debug(f"curl_cffi OK for {url} (profile={profile}, len={len(html)})")
                         return html
                     else:
@@ -112,7 +160,7 @@ async def fetch_with_browser_fingerprint(
                 except Exception:
                     pass
 
-    # Method 2: httpx fallback
+    # Method 2: httpx fallback (works for non-CF sites)
     import httpx
     try:
         async with httpx.AsyncClient() as client:

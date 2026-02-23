@@ -108,7 +108,16 @@ class Settings(BaseSettings):
     SCRAPING_USER_AGENT: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     SCRAPING_RATE_LIMIT: int = 2  # requests per second
     SCRAPING_TIMEOUT: int = 30  # seconds
-    
+
+    # Geocoding (LocationIQ - free tier 5000 req/day, 2 req/sec)
+    LOCATIONIQ_API_KEY: str = ""
+    GEOCODING_TIMEOUT: int = 10
+    GEOCODING_COUNTRY_BIAS: str = "AR"
+
+    # MercadoLibre API (optional — enables API-based scraping)
+    ML_APP_ID: str = ""
+    ML_SECRET_KEY: str = ""
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # or "console"

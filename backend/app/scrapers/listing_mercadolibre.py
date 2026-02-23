@@ -5,41 +5,34 @@ Uses undetected-chromedriver to bypass bot detection.
 
 ## Cookies / Autenticación (IMPORTANTE)
 
-MercadoLibre redirige a verificación de cuenta cuando no detecta cookies válidas de sesión.
-Para resolver esto, el scraper copia las cookies del perfil de Chrome del usuario a un
-directorio temporal y las usa en la sesión de Selenium.
+MercadoLibre requiere cookies de sesión válidas. Este scraper usa un perfil
+persistente de Chrome dedicado para mantener la sesión entre ejecuciones.
 
-### Cómo funciona actualmente (desarrollo local):
-1. _prepare_temp_profile() copia Cookies, Cookies-journal, Network/ y Local State
-   desde el perfil de Chrome del usuario (~AppData/Local/Google/Chrome/User Data/Default)
-   a un directorio temporal.
-2. El driver de Selenium arranca con ese perfil temporal, heredando las cookies válidas.
-3. Al cerrar, el directorio temporal se limpia automáticamente.
-4. NO requiere cerrar Chrome — usa una copia independiente del perfil.
-
-### Requisito:
-- El usuario debe haber visitado MercadoLibre al menos una vez desde Chrome
-  para que existan cookies válidas en el perfil.
+### Cómo funciona:
+1. El scraper crea un perfil dedicado en %LOCALAPPDATA%/ml_scraper_profile/
+   (configurable via ML_SCRAPER_PROFILE_DIR).
+2. La primera vez que se ejecuta, MercadoLibre puede pedir login.
+   El usuario debe loguarse manualmente en la ventana de Chrome que se abre.
+3. Las cookies se guardan en el perfil persistente y se reutilizan en
+   ejecuciones siguientes. No se borra el perfil al cerrar.
+4. Si las cookies expiran, el usuario debe volver a loguarse.
 
 ### Configuración (env vars):
-- CHROME_USER_DATA_DIR: ruta al directorio User Data de Chrome
-  (default: ~/AppData/Local/Google/Chrome/User Data)
-- CHROME_PROFILE_DIR: nombre del perfil (default: "Default")
+- ML_SCRAPER_PROFILE_DIR: ruta al directorio del perfil dedicado
+  (default: %LOCALAPPDATA%/ml_scraper_profile)
 
-### TODO - Producción (Render):
-Este approach solo funciona en desarrollo local. En Render no hay Chrome con sesión activa.
-Opciones para producción:
-1. Exportar cookies de MercadoLibre a un archivo JSON y subirlo como variable de entorno
-   o archivo en Render. El scraper las inyectaría via driver.add_cookie() en vez de
-   copiar el perfil. Las cookies expiran (días a meses), hay que renovarlas periódicamente.
-2. Usar la API pública de MercadoLibre (si hay endpoints disponibles para listings).
-3. Mantener el scraping de MercadoLibre solo en ejecución local.
+### Enriquecimiento desde páginas de detalle:
+Después de scrapear la página de búsqueda, el scraper visita cada
+propiedad individualmente para extraer:
+  - Todas las imágenes (la búsqueda solo muestra 1)
+  - Superficies: total, cubierta, semicubierta, descubierta
+  - Descripción completa
+  - Dirección y barrio
 """
+import asyncio
+import json
 import os
 import re
-import shutil
-import sqlite3
-import tempfile
 import time
 import logging
 from typing import Dict, Any, List, Optional
@@ -57,15 +50,23 @@ except ImportError:
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
 from .listing_base import BaseListingScraper
 
 logger = logging.getLogger(__name__)
+
+# Default persistent profile location
+DEFAULT_PROFILE_DIR = os.path.join(
+    os.environ.get('LOCALAPPDATA', os.path.join(os.path.expanduser('~'), 'AppData', 'Local')),
+    'ml_scraper_profile'
+)
 
 
 class MercadoLibreListingScraper(BaseListingScraper):
     """
     Scraper for MercadoLibre Inmuebles search results.
     Uses Selenium for JavaScript-rendered content.
+    Uses a persistent Chrome profile to maintain ML session cookies.
 
     Builds URLs like:
     - https://inmuebles.mercadolibre.com.ar/departamentos/venta/capital-federal/
@@ -181,126 +182,37 @@ class MercadoLibreListingScraper(BaseListingScraper):
     def __init__(self, search_params: Dict[str, Any], user_agent: Optional[str] = None):
         super().__init__(search_params, user_agent)
         self.driver = None
-        self._temp_profile_dir = None
 
-    @staticmethod
-    def _safe_copy_file(src: str, dst: str) -> bool:
+    # ── Chrome profile & driver management ─────────────────────────
+
+    def _get_persistent_profile_dir(self) -> str:
         """
-        Copy a file even if it's locked by another process (e.g. Chrome).
-        Uses sqlite3.backup() for SQLite databases, binary read fallback otherwise.
+        Get or create the persistent Chrome profile directory.
+
+        Unlike the old temp-profile approach, this directory survives between
+        runs so cookies created by Chrome stay valid (App-Bound Encryption
+        ties cookies to the user-data-dir path).
         """
-        # Try normal copy first
-        try:
-            shutil.copy2(src, dst)
-            return True
-        except PermissionError:
-            pass
-
-        # For SQLite databases (Cookies), use sqlite3.backup()
-        try:
-            src_conn = sqlite3.connect(f"file:{src}?mode=ro&nolock=1", uri=True)
-            dst_conn = sqlite3.connect(dst)
-            src_conn.backup(dst_conn)
-            dst_conn.close()
-            src_conn.close()
-            return True
-        except Exception:
-            pass
-
-        # Last resort: binary read (works if file allows shared read)
-        try:
-            with open(src, 'rb') as f:
-                data = f.read()
-            with open(dst, 'wb') as f:
-                f.write(data)
-            return True
-        except Exception:
-            pass
-
-        return False
-
-    def _safe_copy_tree(self, src_dir: str, dst_dir: str):
-        """Recursively copy a directory, handling locked files."""
-        os.makedirs(dst_dir, exist_ok=True)
-        for entry in os.scandir(src_dir):
-            dst_path = os.path.join(dst_dir, entry.name)
-            if entry.is_dir():
-                self._safe_copy_tree(entry.path, dst_path)
-            else:
-                self._safe_copy_file(entry.path, dst_path)
-
-    def _prepare_temp_profile(self) -> str:
-        """
-        Copy essential cookie/session files from the user's Chrome profile
-        to a temporary directory. This avoids lock file conflicts and
-        corrupt state files while preserving MercadoLibre session cookies.
-
-        Handles Chrome locking Cookies files on Windows by using
-        sqlite3.backup() or binary read as fallback.
-        """
-        chrome_user_data = os.environ.get(
-            'CHROME_USER_DATA_DIR',
-            os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'Google', 'Chrome', 'User Data')
-        )
-        chrome_profile = os.environ.get('CHROME_PROFILE_DIR', 'Default')
-
-        src_profile = os.path.join(chrome_user_data, chrome_profile)
-        temp_dir = tempfile.mkdtemp(prefix='ml_scraper_')
-        dst_profile = os.path.join(temp_dir, chrome_profile)
-        os.makedirs(dst_profile, exist_ok=True)
-
-        # Copy Local State (contains cookie encryption key, needed by Chrome)
-        local_state_src = os.path.join(chrome_user_data, 'Local State')
-        if os.path.exists(local_state_src):
-            self._safe_copy_file(local_state_src, os.path.join(temp_dir, 'Local State'))
-
-        # Copy only essential session/cookie files from the profile
-        essential_files = [
-            'Cookies',
-            'Cookies-journal',
-            'Network',  # directory with cookies in newer Chrome versions
-        ]
-        copied = []
-        failed = []
-        for filename in essential_files:
-            src = os.path.join(src_profile, filename)
-            dst = os.path.join(dst_profile, filename)
-            if os.path.isdir(src):
-                self._safe_copy_tree(src, dst)
-                copied.append(filename)
-            elif os.path.exists(src):
-                if self._safe_copy_file(src, dst):
-                    copied.append(filename)
-                else:
-                    failed.append(filename)
-
-        print(f"[DEBUG] [mercadolibre] Copied cookies from {src_profile} to {dst_profile} (copied: {copied}, failed: {failed})")
-        self._temp_profile_dir = temp_dir
-        return temp_dir
+        profile_dir = os.environ.get('ML_SCRAPER_PROFILE_DIR', DEFAULT_PROFILE_DIR)
+        is_first_run = not os.path.exists(profile_dir)
+        if is_first_run:
+            os.makedirs(profile_dir, exist_ok=True)
+            logger.info(f"[mercadolibre] Created persistent profile at: {profile_dir}")
+            print(f"[INFO] [mercadolibre] First run — created profile at: {profile_dir}")
+            print(f"[INFO] [mercadolibre] If MercadoLibre asks you to log in, please do so in the browser window.")
+        return profile_dir
 
     def _get_driver(self, headless: bool = False):
         """
-        Create and return a configured Chrome WebDriver using copied cookies
-        from the user's Chrome profile.
+        Create Chrome WebDriver using persistent profile for ML session.
 
-        Copies essential cookie files to a temp directory to avoid profile lock
-        conflicts while inheriting valid MercadoLibre session cookies.
-
-        Configuration via environment variables:
-            - CHROME_USER_DATA_DIR: Path to Chrome's User Data directory
-            - CHROME_PROFILE_DIR: Profile directory name (default: "Default")
-
-        Args:
-            headless: Whether to run in headless mode. Note: MercadoLibre detection
-                     works better without headless mode (opens visible browser window).
+        The persistent profile keeps cookies valid across runs because
+        they were created IN this profile (avoids App-Bound Encryption issues).
         """
         if self.driver:
             return self.driver
 
-        chrome_profile = os.environ.get('CHROME_PROFILE_DIR', 'Default')
-
-        # Create temp profile with copied cookies
-        temp_user_data = self._prepare_temp_profile()
+        profile_dir = self._get_persistent_profile_dir()
 
         if USE_UNDETECTED:
             # Detect installed Chrome major version to avoid driver mismatch
@@ -311,13 +223,12 @@ class MercadoLibreListingScraper(BaseListingScraper):
                 chrome_version, _ = winreg.QueryValueEx(key, "version")
                 winreg.CloseKey(key)
                 version_main = int(chrome_version.split('.')[0])
-                print(f"[DEBUG] [mercadolibre] Detected Chrome version: {chrome_version} (major: {version_main})")
+                print(f"[DEBUG] [mercadolibre] Detected Chrome v{version_main}")
             except Exception as e:
                 print(f"[DEBUG] [mercadolibre] Could not detect Chrome version: {e}")
 
-            print(f"[DEBUG] [mercadolibre] Using undetected-chromedriver (headless={headless})")
+            print(f"[DEBUG] [mercadolibre] Using undetected-chromedriver with persistent profile")
             options = uc.ChromeOptions()
-            options.add_argument(f'--profile-directory={chrome_profile}')
 
             if headless:
                 options.add_argument('--headless=new')
@@ -328,14 +239,13 @@ class MercadoLibreListingScraper(BaseListingScraper):
 
             self.driver = uc.Chrome(
                 options=options,
-                user_data_dir=temp_user_data,
+                user_data_dir=profile_dir,
                 version_main=version_main,
             )
         else:
             print("[DEBUG] [mercadolibre] Using regular selenium (undetected not available)")
             chrome_options = Options()
-            chrome_options.add_argument(f'--user-data-dir={temp_user_data}')
-            chrome_options.add_argument(f'--profile-directory={chrome_profile}')
+            chrome_options.add_argument(f'--user-data-dir={profile_dir}')
 
             if headless:
                 chrome_options.add_argument('--headless=new')
@@ -353,7 +263,7 @@ class MercadoLibreListingScraper(BaseListingScraper):
         return self.driver
 
     def _close_driver(self):
-        """Close the WebDriver and clean up temporary profile directory"""
+        """Close the WebDriver. Profile directory is kept for next run."""
         if self.driver:
             try:
                 self.driver.quit()
@@ -361,12 +271,7 @@ class MercadoLibreListingScraper(BaseListingScraper):
                 pass
             self.driver = None
 
-        if self._temp_profile_dir and os.path.exists(self._temp_profile_dir):
-            try:
-                shutil.rmtree(self._temp_profile_dir, ignore_errors=True)
-            except Exception:
-                pass
-            self._temp_profile_dir = None
+    # ── URL building ───────────────────────────────────────────────
 
     def build_search_url(self, page: int = 1) -> str:
         """
@@ -463,34 +368,35 @@ class MercadoLibreListingScraper(BaseListingScraper):
 
         return url
 
+    # ── Page fetching & scraping ───────────────────────────────────
+
     async def fetch_page(self, url: str) -> str:
-        """Fetch page using Selenium for JavaScript-rendered content"""
-        # MercadoLibre detection works better without headless mode
+        """Fetch page using Selenium in a thread pool to avoid blocking the event loop."""
+        return await asyncio.to_thread(self._fetch_page_sync, url)
+
+    def _fetch_page_sync(self, url: str) -> str:
+        """Synchronous Selenium fetch — runs in a worker thread."""
         driver = self._get_driver(headless=False)
 
         try:
             print(f"[DEBUG] [mercadolibre] Selenium loading: {url}")
             driver.get(url)
 
-            # Wait for page to load
             WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
 
-            # Wait for content to render (MercadoLibre loads content dynamically)
             time.sleep(5)
 
             # Check if we got a verification page (bot detection)
             page_source = driver.page_source
             if 'account-verification' in page_source or 'message-code' in page_source:
                 print("[DEBUG] [mercadolibre] Bot detection triggered - verification page shown")
-                # Try scrolling to trigger lazy loading
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
                 time.sleep(2)
                 driver.execute_script("window.scrollTo(0, 0);")
                 time.sleep(2)
 
-            # Try multiple selectors for listing cards
             card_selectors = [
                 'a[href*="mercadolibre.com.ar/MLA"]',
                 'a[href*="/MLA-"]',
@@ -515,9 +421,44 @@ class MercadoLibreListingScraper(BaseListingScraper):
                     continue
 
             if not found_cards:
-                print("[DEBUG] [mercadolibre] No listing cards found with any selector")
-                # Last resort: wait more and try again
-                time.sleep(3)
+                current_url = driver.current_url
+                is_login = (
+                    'login' in current_url
+                    or 'auth.' in current_url
+                    or 'verification' in current_url
+                    or 'inmuebles.mercadolibre' not in current_url
+                )
+                if is_login:
+                    print("[INFO] [mercadolibre] Login page detected.")
+                    print("[INFO] [mercadolibre] Please log in in the browser window. Waiting up to 30 seconds...")
+                    logged_in = False
+                    for _ in range(10):  # 10 * 3s = 30s (was 40 * 3s = 2min)
+                        time.sleep(3)
+                        current_url = driver.current_url
+                        if 'login' not in current_url and 'auth.' not in current_url and 'verification' not in current_url:
+                            logged_in = True
+                            break
+                    if logged_in:
+                        print("[INFO] [mercadolibre] Login successful! Re-loading search page...")
+                        driver.get(url)
+                        time.sleep(5)
+                        for selector in card_selectors:
+                            try:
+                                WebDriverWait(driver, 3).until(
+                                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                                )
+                                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                                if elements:
+                                    print(f"[DEBUG] [mercadolibre] After login: found {len(elements)} elements")
+                                    found_cards = True
+                                    break
+                            except Exception:
+                                continue
+                    else:
+                        print("[WARN] [mercadolibre] Login timeout (30s). Continuing anyway...")
+                else:
+                    print("[DEBUG] [mercadolibre] No listing cards found with any selector")
+                    time.sleep(3)
 
             html = driver.page_source
             print(f"[DEBUG] [mercadolibre] Got HTML, length: {len(html)}")
@@ -528,11 +469,18 @@ class MercadoLibreListingScraper(BaseListingScraper):
             raise
 
     async def scrape_all_pages(self, max_properties: int = 100) -> List[Dict[str, Any]]:
-        """Override to ensure driver is closed after scraping"""
+        """Scrape all pages, enrich from detail pages, then close driver."""
         try:
-            return await super().scrape_all_pages(max_properties)
+            cards = await super().scrape_all_pages(max_properties)
+            # Enrich cards with images and features from detail pages
+            # Run in thread to avoid blocking the event loop with Selenium
+            if cards and self.driver:
+                cards = await asyncio.to_thread(self._enrich_cards_from_detail, cards)
+            return cards
         finally:
             self._close_driver()
+
+    # ── Card extraction from search results ────────────────────────
 
     def extract_property_cards(self) -> List[Dict[str, Any]]:
         """Extract property listings from MercadoLibre search results page"""
@@ -738,3 +686,295 @@ class MercadoLibreListingScraper(BaseListingScraper):
                         pass
 
         return None
+
+    # ── Detail page enrichment ─────────────────────────────────────
+
+    def _enrich_cards_from_detail(
+        self, cards: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Visit each property's detail page to extract all images and features.
+
+        The search page only provides 1 thumbnail per listing. Detail pages
+        have the full image gallery, surface areas, and other features.
+        """
+        enriched = 0
+        to_enrich = cards
+        print(f"[DEBUG] [mercadolibre] Enriching {len(to_enrich)} cards from detail pages...")
+
+        for i, card in enumerate(to_enrich):
+            url = card.get('source_url')
+            if not url:
+                continue
+            try:
+                detail_data = self._extract_detail_data(url)
+
+                # Merge images (detail page has the full gallery)
+                if detail_data.get('images'):
+                    card['images'] = detail_data['images']
+
+                # Merge features not already in the search card
+                for key in [
+                    'total_area', 'covered_area', 'semi_covered_area',
+                    'uncovered_area', 'bedrooms', 'bathrooms',
+                    'parking_spaces', 'description', 'address', 'neighborhood',
+                ]:
+                    if detail_data.get(key) is not None and not card.get(key):
+                        card[key] = detail_data[key]
+
+                n_imgs = len(detail_data.get('images', []))
+                enriched += 1
+                print(f"[DEBUG] [mercadolibre]   Card {i+1}/{len(to_enrich)}: {n_imgs} images")
+
+            except Exception as e:
+                logger.debug(f"[mercadolibre] Error enriching card {i+1}: {e}")
+
+            # Rate limit between detail pages
+            if i < len(to_enrich) - 1:
+                time.sleep(2)
+
+        print(f"[DEBUG] [mercadolibre] Enriched {enriched}/{len(to_enrich)} cards")
+        return cards
+
+    def _extract_detail_data(self, url: str) -> Dict[str, Any]:
+        """Extract images and features from a property detail page."""
+        data: Dict[str, Any] = {}
+
+        self.driver.get(url)
+        time.sleep(3)
+
+        # Progressive scroll to trigger lazy loading of images and content
+        total_height = self.driver.execute_script("return document.body.scrollHeight")
+        for scroll_pos in range(0, min(total_height, 5000), 500):
+            self.driver.execute_script(f"window.scrollTo(0, {scroll_pos});")
+            time.sleep(0.3)
+        # Scroll back to top
+        self.driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+
+        html = self.driver.page_source
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Extract images
+        images = self._extract_detail_images(soup)
+        if images:
+            data['images'] = images
+
+        # Extract features (surface areas, rooms, etc.)
+        features = self._extract_detail_features(soup)
+        data.update(features)
+
+        # Extract description
+        desc_selectors = [
+            '[class*="item-description"] p',
+            '[class*="description__content"]',
+            '[class*="description"] p',
+        ]
+        for sel in desc_selectors:
+            desc_elem = soup.select_one(sel)
+            if desc_elem:
+                data['description'] = desc_elem.get_text(strip=True)[:2000]
+                break
+
+        # Extract location from embedded JSON (ML stores address in page state)
+        # The page contains JSON with "item_address", "neighborhood", "city" fields
+        address_match = re.search(r'"item_address"\s*:\s*"([^"]+)"', html)
+        if address_match:
+            data['address'] = address_match.group(1)
+
+        neighborhood_match = re.search(r'"neighborhood"\s*:\s*"([^"]+)"', html)
+        if neighborhood_match:
+            data['neighborhood'] = neighborhood_match.group(1)
+
+        city_match = re.search(r'"city"\s*:\s*"([^"]+)"', html)
+        if city_match:
+            data['city'] = city_match.group(1)
+
+        # Fallback: Extract location / address from CSS selectors
+        if not data.get('address') and not data.get('neighborhood'):
+            loc_selectors = [
+                '[class*="location-subtitle"]',
+                '[class*="map-address"]',
+                '[class*="item-location"]',
+            ]
+            for sel in loc_selectors:
+                loc_elem = soup.select_one(sel)
+                if loc_elem:
+                    loc_text = loc_elem.get_text(strip=True)
+                    parts = [p.strip() for p in loc_text.split(',') if p.strip()]
+                    if parts:
+                        if re.search(r'\d', parts[0]) and len(parts) >= 2:
+                            data['address'] = parts[0]
+                            data['neighborhood'] = parts[1]
+                        elif not re.search(r'\d', parts[0]):
+                            data['neighborhood'] = parts[0]
+                    break
+
+        return data
+
+    def _extract_detail_images(self, soup: BeautifulSoup) -> List[str]:
+        """Extract all property images from detail page."""
+        images: List[str] = []
+        seen: set = set()
+
+        # Strategy 1: Gallery / carousel images
+        gallery_selectors = [
+            'figure img[src*="http"]',
+            '[class*="gallery"] img[src*="http"]',
+            '[class*="carousel"] img[src*="http"]',
+            '[class*="slick"] img[src*="http"]',
+            'img[src*="mlstatic.com"]',
+        ]
+
+        for selector in gallery_selectors:
+            for img in soup.select(selector):
+                for attr in ['data-zoom-src', 'data-src', 'src']:
+                    url = img.get(attr, '')
+                    if url and 'mlstatic.com' in url and url not in seen:
+                        upgraded = self._upgrade_image_url(url)
+                        if upgraded not in seen:
+                            seen.add(upgraded)
+                            images.append(upgraded)
+
+        # Strategy 2: JSON-LD structured data
+        if not images:
+            for script in soup.find_all('script', type='application/ld+json'):
+                try:
+                    ld = json.loads(script.string or '')
+                    if isinstance(ld, dict):
+                        img_list = ld.get('image', [])
+                        if isinstance(img_list, str):
+                            img_list = [img_list]
+                        for url in img_list:
+                            if url and url not in seen:
+                                seen.add(url)
+                                images.append(url)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        # Strategy 3: og:image meta tag
+        if not images:
+            og = soup.find('meta', property='og:image')
+            if og and og.get('content'):
+                images.append(og['content'])
+
+        return images[:20]
+
+    @staticmethod
+    def _upgrade_image_url(url: str) -> str:
+        """Upgrade ML image URL to larger resolution."""
+        # ML thumbnails use smaller dimensions; replace with full-size -O variant
+        url = re.sub(r'-\d+x\d+\.', '-O.', url)
+        return url
+
+    def _extract_detail_features(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """Extract property features (surfaces, rooms, etc.) from detail page."""
+        features: Dict[str, Any] = {}
+
+        # Strategy 1: Structured specs table/rows
+        spec_selectors = [
+            '[class*="specs"] tr',
+            '[class*="attribute"] tr',
+            '[class*="specs-item"]',
+            '[class*="attribute-content"]',
+            'table[class*="andes-table"] tr',
+        ]
+
+        spec_rows = []
+        for selector in spec_selectors:
+            spec_rows = soup.select(selector)
+            if spec_rows:
+                break
+
+        for row in spec_rows:
+            cells = row.find_all(['td', 'th', 'span', 'p', 'dt', 'dd'])
+            if len(cells) >= 2:
+                label = cells[0].get_text(strip=True).lower()
+                value = cells[1].get_text(strip=True)
+                self._parse_feature(features, label, value)
+
+        # Strategy 2: Key-value list items (common ML pattern)
+        if not features:
+            kv_selectors = [
+                '[class*="technical-specifications"] li',
+                '[class*="attribute"] li',
+                '[class*="specs"] li',
+            ]
+            for selector in kv_selectors:
+                items = soup.select(selector)
+                for item in items:
+                    text = item.get_text(strip=True)
+                    if ':' in text:
+                        parts = text.split(':', 1)
+                        self._parse_feature(features, parts[0].strip(), parts[1].strip())
+                    else:
+                        self._parse_feature_text(features, text.lower())
+
+        # Strategy 3: Highlighted feature chips (search for area patterns anywhere)
+        if not features.get('total_area') and not features.get('covered_area'):
+            highlight_selectors = [
+                '[class*="highlight"]',
+                '[class*="item-detail"]',
+                '[class*="short-description"]',
+            ]
+            for selector in highlight_selectors:
+                for elem in soup.select(selector):
+                    self._parse_feature_text(features, elem.get_text(strip=True).lower())
+
+        return features
+
+    def _parse_feature(self, features: Dict, label: str, value: str):
+        """Parse a single label-value feature pair into the features dict."""
+        label = label.lower().strip()
+        value = value.strip()
+
+        if 'superficie total' in label or 'sup. total' in label:
+            m = re.search(r'(\d+(?:[.,]\d+)?)', value)
+            if m:
+                features['total_area'] = float(m.group(1).replace(',', '.'))
+        elif 'superficie cubierta' in label or 'sup. cubierta' in label or 'sup. cub' in label:
+            m = re.search(r'(\d+(?:[.,]\d+)?)', value)
+            if m:
+                features['covered_area'] = float(m.group(1).replace(',', '.'))
+        elif 'semicubierta' in label:
+            m = re.search(r'(\d+(?:[.,]\d+)?)', value)
+            if m:
+                features['semi_covered_area'] = float(m.group(1).replace(',', '.'))
+        elif 'descubierta' in label:
+            m = re.search(r'(\d+(?:[.,]\d+)?)', value)
+            if m:
+                features['uncovered_area'] = float(m.group(1).replace(',', '.'))
+        elif 'ambientes' in label or 'ambiente' in label:
+            m = re.search(r'(\d+)', value)
+            if m:
+                features['bedrooms'] = int(m.group(1))
+        elif 'dormitorio' in label:
+            m = re.search(r'(\d+)', value)
+            if m:
+                features['bedrooms'] = int(m.group(1))
+        elif 'baño' in label:
+            m = re.search(r'(\d+)', value)
+            if m:
+                features['bathrooms'] = int(m.group(1))
+        elif 'cochera' in label or 'garage' in label or 'estacionamiento' in label:
+            m = re.search(r'(\d+)', value)
+            if m:
+                features['parking_spaces'] = int(m.group(1))
+
+    def _parse_feature_text(self, features: Dict, text: str):
+        """Parse features from unstructured text (e.g. '108 m² tot')."""
+        # Total area
+        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*(?:total|tot)', text)
+        if m and 'total_area' not in features:
+            features['total_area'] = float(m.group(1).replace(',', '.'))
+
+        # Covered area
+        m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]?\s*(?:cubierta|cub)', text)
+        if m and 'covered_area' not in features:
+            features['covered_area'] = float(m.group(1).replace(',', '.'))
+
+        # Bare area (no qualifier) → treat as total
+        if 'total_area' not in features and 'covered_area' not in features:
+            m = re.search(r'(\d+(?:[.,]\d+)?)\s*m[²2]', text)
+            if m:
+                features['total_area'] = float(m.group(1).replace(',', '.'))
