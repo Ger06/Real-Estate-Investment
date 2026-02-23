@@ -178,10 +178,11 @@ class PriceHistory(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     property_id = Column(UUID(as_uuid=True), ForeignKey("properties.id"), nullable=False, index=True)
     price = Column(Numeric(12, 2), nullable=False)
+    previous_price = Column(Numeric(12, 2), nullable=True)
     currency = Column(Enum(Currency), nullable=False)
-    change_percentage = Column(Numeric(5, 2), nullable=True)
+    change_percentage = Column(Numeric(10, 2), nullable=True)
     recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    
+
     # Relationships
     property = relationship("Property", back_populates="price_history")
     

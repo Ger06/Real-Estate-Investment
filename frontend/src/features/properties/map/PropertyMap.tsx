@@ -21,7 +21,8 @@ const DEFAULT_ZOOM = 12;
 export default function PropertyMap() {
   const [filters, setFilters] = useState<PropertyFilters>({});
   const [showHeatmap, setShowHeatmap] = useState(false);
-  const [heatmapMetric, setHeatmapMetric] = useState<'price' | 'price_per_sqm'>('price');
+  const [heatmapMetric, setHeatmapMetric] = useState<'price' | 'price_per_sqm' | 'price_change'>('price');
+  const [priceChangeDays, setPriceChangeDays] = useState<number | null>(30);
 
   const { data, isLoading, error } = useMapProperties(filters);
 
@@ -37,6 +38,8 @@ export default function PropertyMap() {
         onToggleHeatmap={setShowHeatmap}
         heatmapMetric={heatmapMetric}
         onHeatmapMetricChange={setHeatmapMetric}
+        priceChangeDays={priceChangeDays}
+        onPriceChangeDaysChange={setPriceChangeDays}
       />
 
       <Box sx={{ flex: 1, position: 'relative', borderRadius: 1, overflow: 'hidden' }}>
@@ -78,18 +81,17 @@ export default function PropertyMap() {
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
 
-          {!showHeatmap && (
-            <MarkerClusterGroup key={JSON.stringify(filters)} chunkedLoading>
-              {properties.map((prop) => (
-                <PropertyMarker key={prop.id} property={prop} />
-              ))}
-            </MarkerClusterGroup>
-          )}
+          <MarkerClusterGroup key={JSON.stringify(filters)} chunkedLoading>
+            {properties.map((prop) => (
+              <PropertyMarker key={prop.id} property={prop} />
+            ))}
+          </MarkerClusterGroup>
 
           <HeatmapLayer
             properties={properties}
             metric={heatmapMetric}
             visible={showHeatmap}
+            priceChangeDays={priceChangeDays}
           />
         </MapContainer>
       </Box>

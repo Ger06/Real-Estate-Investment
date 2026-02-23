@@ -17,7 +17,10 @@
       "Bash(tasks \")",
       "Bash(npx tsc:*)",
       "Bash(npm run build:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "WebFetch(domain:developers.mercadolibre.com.ar)",
+      "WebFetch(domain:publicapi.dev)",
+      "WebFetch(domain:global-selling.mercadolibre.com)"
     ]
   }
 }

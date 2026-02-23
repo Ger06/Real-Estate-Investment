@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     GEOCODING_TIMEOUT: int = 10
     GEOCODING_COUNTRY_BIAS: str = "AR"
 
+    # MercadoLibre API (optional — enables API-based scraping)
+    ML_APP_ID: str = ""
+    ML_SECRET_KEY: str = ""
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # or "console"

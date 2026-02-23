@@ -26,8 +26,10 @@ interface MapFilterPanelProps {
   totalResults: number;
   showHeatmap: boolean;
   onToggleHeatmap: (show: boolean) => void;
-  heatmapMetric: 'price' | 'price_per_sqm';
-  onHeatmapMetricChange: (metric: 'price' | 'price_per_sqm') => void;
+  heatmapMetric: 'price' | 'price_per_sqm' | 'price_change';
+  onHeatmapMetricChange: (metric: 'price' | 'price_per_sqm' | 'price_change') => void;
+  priceChangeDays: number | null;
+  onPriceChangeDaysChange: (days: number | null) => void;
 }
 
 export default function MapFilterPanel({
@@ -38,6 +40,8 @@ export default function MapFilterPanel({
   onToggleHeatmap,
   heatmapMetric,
   onHeatmapMetricChange,
+  priceChangeDays,
+  onPriceChangeDaysChange,
 }: MapFilterPanelProps) {
   const [filters, setFilters] = useState<PropertyFilters>(initialFilters);
 
@@ -234,10 +238,30 @@ export default function MapFilterPanel({
           <Select
             value={heatmapMetric}
             label="Métrica"
-            onChange={(e) => onHeatmapMetricChange(e.target.value as 'price' | 'price_per_sqm')}
+            onChange={(e) => onHeatmapMetricChange(e.target.value as 'price' | 'price_per_sqm' | 'price_change')}
           >
             <MenuItem value="price">Precio</MenuItem>
             <MenuItem value="price_per_sqm">Precio/m²</MenuItem>
+            <MenuItem value="price_change">Variación de precio</MenuItem>
+          </Select>
+        </FormControl>
+      )}
+
+      {showHeatmap && heatmapMetric === 'price_change' && (
+        <FormControl fullWidth size="small">
+          <InputLabel>Período</InputLabel>
+          <Select
+            value={priceChangeDays ?? 'all'}
+            label="Período"
+            onChange={(e) =>
+              onPriceChangeDaysChange(e.target.value === 'all' ? null : Number(e.target.value))
+            }
+          >
+            <MenuItem value={7}>Últimos 7 días</MenuItem>
+            <MenuItem value={30}>Últimos 30 días</MenuItem>
+            <MenuItem value={90}>Últimos 90 días</MenuItem>
+            <MenuItem value={365}>Último año</MenuItem>
+            <MenuItem value="all">Todo el historial</MenuItem>
           </Select>
         </FormControl>
       )}

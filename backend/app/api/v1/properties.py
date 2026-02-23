@@ -14,7 +14,7 @@ from geoalchemy2.shape import from_shape, to_shape
 from shapely.geometry import Point
 
 from app.database import get_db
-from app.models.property import Property, PropertyImage, PropertySource, PriceHistory, PropertyStatus
+from app.models.property import Property, PropertyImage, PropertySource, PriceHistory, PropertyStatus, Currency
 from app.models.pending_property import PendingProperty
 from app.schemas.property import (
     PropertyScrapeRequest,
@@ -25,6 +25,7 @@ from app.schemas.property import (
     PropertyListResponse,
     PropertyMapItem,
     PropertyMapResponse,
+    LastPriceChange,
 )
 from app.scrapers import ArgenpropScraper, ZonapropScraper, RemaxScraper, MercadoLibreScraper
 from app.services.geocoding import geocoding_service
@@ -76,8 +77,11 @@ def _apply_property_filters(
     neighborhood: Optional[str] = None,
     city: Optional[str] = None,
     has_location: Optional[bool] = None,
+    source: Optional[str] = None,
 ):
     """Apply common property filters to a query statement"""
+    if source:
+        stmt = stmt.where(Property.source == source)
     if property_type:
         stmt = stmt.where(Property.property_type == property_type)
     if operation_type:
@@ -202,6 +206,7 @@ async def scrape_property(
 async def list_properties(
     skip: int = 0,
     limit: int = 50,
+    source: Optional[str] = Query(None),
     property_type: Optional[str] = Query(None),
     operation_type: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -225,7 +230,7 @@ async def list_properties(
     count_stmt = _apply_property_filters(
         count_stmt, property_type, operation_type, status_filter, currency,
         price_min, price_max, area_min, area_max, bedrooms_min, bathrooms_min,
-        neighborhood, city, has_location,
+        neighborhood, city, has_location, source,
     )
     total_result = await db.execute(count_stmt)
     total = total_result.scalar()
@@ -235,7 +240,7 @@ async def list_properties(
     stmt = _apply_property_filters(
         stmt, property_type, operation_type, status_filter, currency,
         price_min, price_max, area_min, area_max, bedrooms_min, bathrooms_min,
-        neighborhood, city, has_location,
+        neighborhood, city, has_location, source,
     )
     stmt = stmt.offset(skip).limit(limit)
     result = await db.execute(stmt)
@@ -287,6 +292,15 @@ async def list_properties_for_map(
                 (img.url for img in prop.images if img.is_primary),
                 prop.images[0].url if prop.images else None,
             )
+            last_price_change_data = None
+            if prop.price_history:
+                most_recent = sorted(prop.price_history, key=lambda h: h.recorded_at, reverse=True)[0]
+                if most_recent.previous_price is not None:
+                    last_price_change_data = LastPriceChange(
+                        previous_price=float(most_recent.previous_price),
+                        change_pct=float(most_recent.change_percentage or 0),
+                        changed_at=most_recent.recorded_at,
+                    )
             items.append(PropertyMapItem(
                 id=prop.id,
                 title=prop.title,
@@ -307,6 +321,8 @@ async def list_properties_for_map(
                 primary_image_url=primary_image,
                 observations=prop.observations,
                 source_url=prop.source_url,
+                scraped_at=prop.scraped_at,
+                last_price_change=last_price_change_data,
             ))
         except Exception:
             continue
@@ -558,6 +574,210 @@ async def get_property(
     return property_obj
 
 
+@router.post("/{property_id}/rescrape")
+async def rescrape_single_property(
+    property_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Re-scrape a single property and return detailed diagnostic info.
+    Updates price, status, and scraped_at in the DB if scraping succeeds.
+    Useful for debugging extraction issues without creating a new DB entry.
+    """
+    stmt = select(Property).where(Property.id == property_id)
+    result = await db.execute(stmt)
+    property_obj = result.scalar_one_or_none()
+    if not property_obj:
+        raise HTTPException(status_code=404, detail="Propiedad no encontrada")
+    if not property_obj.source_url:
+        raise HTTPException(status_code=400, detail="La propiedad no tiene source_url")
+
+    # Determine scraper
+    scraper = None
+    if "argenprop.com" in property_obj.source_url:
+        scraper = ArgenpropScraper(property_obj.source_url)
+    elif "zonaprop.com" in property_obj.source_url:
+        scraper = ZonapropScraper(property_obj.source_url)
+    elif "remax.com" in property_obj.source_url:
+        scraper = RemaxScraper(property_obj.source_url)
+    elif "mercadolibre.com" in property_obj.source_url:
+        scraper = MercadoLibreScraper(property_obj.source_url)
+    else:
+        raise HTTPException(status_code=400, detail="Portal no soportado para re-scraping")
+
+    old_price = float(property_obj.price) if property_obj.price else 0.0
+    old_status = property_obj.status.value if hasattr(property_obj.status, 'value') else str(property_obj.status)
+
+    logger.info(
+        f"[rescrape] Iniciando: property_id={property_id}, "
+        f"url={property_obj.source_url}, old_price={old_price}"
+    )
+
+    try:
+        scraped_data = await asyncio.wait_for(scraper.scrape(), timeout=45.0)
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "error": "Timeout (45s) — el scraping tardó demasiado",
+            "source_url": property_obj.source_url,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "source_url": property_obj.source_url,
+        }
+
+    new_price = scraped_data.get('price')
+    new_status_str = scraped_data.get('status', 'active')
+    html_text_length = len(scraper.soup.get_text()) if scraper.soup else 0
+
+    logger.info(
+        f"[rescrape] Resultado: new_price={scraped_data.get('price')}, "
+        f"currency={scraped_data.get('currency')}, "
+        f"title={str(scraped_data.get('title', ''))[:60]}, "
+        f"html_len={html_text_length}"
+    )
+
+    # Update DB
+    price_changed = False
+    if new_price is not None:
+        new_currency_str = scraped_data.get('currency', 'USD')
+        try:
+            new_currency = Currency(new_currency_str)
+        except ValueError:
+            new_currency = Currency.USD
+
+        # Registrar historial solo si el precio cambió respecto al anterior
+        if old_price and abs(new_price - old_price) > 0.01:
+            change_pct = ((new_price - old_price) / old_price) * 100
+            db.add(PriceHistory(
+                property_id=property_obj.id,
+                price=new_price,
+                previous_price=old_price,
+                currency=new_currency,
+                change_percentage=change_pct,
+                recorded_at=datetime.utcnow(),
+            ))
+            price_changed = True
+
+        # Siempre actualizar el precio al valor más reciente
+        property_obj.price = new_price
+        property_obj.currency = new_currency
+        if property_obj.total_area:
+            property_obj.price_per_sqm = new_price / float(property_obj.total_area)
+
+    property_obj.status = _parse_status(new_status_str)
+    property_obj.scraped_at = datetime.utcnow()
+    await db.commit()
+
+    return {
+        "success": True,
+        "source_url": property_obj.source_url,
+        "html_text_length": html_text_length,
+        "old_price": old_price,
+        "new_price": new_price,
+        "scraped_currency": scraped_data.get('currency'),
+        "price_changed": price_changed,
+        "old_status": old_status,
+        "new_status": new_status_str,
+        "status_changed": old_status != new_status_str,
+        "scraped_title": scraped_data.get('title'),
+    }
+
+
+@router.get("/{property_id}/scrape-preview")
+async def scrape_preview(
+    property_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Ejecuta el scraper y devuelve TODOS los datos extraídos sin modificar la DB.
+    Útil para diagnosticar por qué no se extrae el precio u otros campos.
+    """
+    stmt = select(Property).where(Property.id == property_id)
+    result = await db.execute(stmt)
+    property_obj = result.scalar_one_or_none()
+    if not property_obj:
+        raise HTTPException(status_code=404, detail="Propiedad no encontrada")
+    if not property_obj.source_url:
+        raise HTTPException(status_code=400, detail="La propiedad no tiene source_url")
+
+    scraper = None
+    if "argenprop.com" in property_obj.source_url:
+        scraper = ArgenpropScraper(property_obj.source_url)
+    elif "zonaprop.com" in property_obj.source_url:
+        scraper = ZonapropScraper(property_obj.source_url)
+    elif "remax.com" in property_obj.source_url:
+        scraper = RemaxScraper(property_obj.source_url)
+    elif "mercadolibre.com" in property_obj.source_url:
+        scraper = MercadoLibreScraper(property_obj.source_url)
+    else:
+        raise HTTPException(status_code=400, detail="Portal no soportado")
+
+    try:
+        scraped_data = await asyncio.wait_for(scraper.scrape(), timeout=45.0)
+    except asyncio.TimeoutError:
+        return {"error": "Timeout (45s)", "source_url": property_obj.source_url}
+    except Exception as e:
+        return {"error": str(e), "source_url": property_obj.source_url}
+
+    # Internal scraper state — tells us WHICH strategy succeeded
+    soup_present = scraper.soup is not None
+    soup_text_len = len(scraper.soup.get_text()) if scraper.soup else 0
+    api_data_present = bool(getattr(scraper, "_api_data", None))
+
+    # If soup exists, show a snippet of the price area for manual inspection
+    price_html_snippet = ""
+    if scraper.soup:
+        for selector in [
+            "span.andes-money-amount__fraction",
+            "div.ui-pdp-price",
+            "[class*='price__main']",
+            "[class*='price']",
+        ]:
+            el = scraper.soup.select_one(selector)
+            if el:
+                price_html_snippet = str(el)[:300]
+                break
+
+    # JSON-LD block found in the page
+    json_ld_found = False
+    json_ld_offers = None
+    if scraper.soup:
+        for script in scraper.soup.find_all("script", type="application/ld+json"):
+            if script.string:
+                try:
+                    import json as _json
+                    data = _json.loads(script.string)
+                    candidates = data if isinstance(data, list) else [data]
+                    for item in candidates:
+                        if isinstance(item, dict) and item.get("@type") == "Product":
+                            json_ld_found = True
+                            json_ld_offers = item.get("offers")
+                            break
+                except Exception:
+                    pass
+            if json_ld_found:
+                break
+
+    return {
+        "source_url": property_obj.source_url,
+        "db_price": float(property_obj.price) if property_obj.price else None,
+        # --- Extracted data (complete) ---
+        "scraped_data": scraped_data,
+        # --- Internal scraper diagnostics ---
+        "diagnostics": {
+            "soup_present": soup_present,
+            "soup_text_len": soup_text_len,
+            "api_data_present": api_data_present,
+            "json_ld_product_found": json_ld_found,
+            "json_ld_offers": json_ld_offers,
+            "price_html_snippet": price_html_snippet,
+        },
+    }
+
+
 @router.put("/{property_id}", response_model=PropertyResponse)
 async def update_property(
     property_id: UUID,
@@ -581,6 +801,10 @@ async def update_property(
     # Update fields
     update_data = property_in.model_dump(exclude_unset=True)
 
+    # Capture old price before applying changes
+    old_price = float(property_obj.price) if property_obj.price is not None else None
+    new_price_val = update_data.get("price")
+
     # Handle lat/lng -> PostGIS Point conversion
     lat = update_data.pop("latitude", None)
     lng = update_data.pop("longitude", None)
@@ -596,6 +820,20 @@ async def update_property(
 
     await db.commit()
     await db.refresh(property_obj)
+
+    # Create PriceHistory record if price changed significantly
+    if new_price_val is not None and old_price is not None and abs(float(new_price_val) - old_price) > 0.01:
+        change_pct = ((float(new_price_val) - old_price) / old_price) * 100
+        price_history = PriceHistory(
+            property_id=property_obj.id,
+            price=new_price_val,
+            previous_price=old_price,
+            currency=property_obj.currency,
+            change_percentage=change_pct,
+        )
+        db.add(price_history)
+        await db.commit()
+        await db.refresh(property_obj)
 
     return property_obj
 
@@ -628,6 +866,7 @@ async def delete_property(
 @router.post("/update-prices")
 async def update_all_prices(
     db: AsyncSession = Depends(get_db),
+    portal: Optional[str] = Query(default=None, description="Filter by portal: mercadolibre, argenprop, zonaprop, remax"),
 ):
     """
     Update prices for all properties from their source URLs.
@@ -636,6 +875,10 @@ async def update_all_prices(
     try:
         # Get all properties with source URLs
         stmt = select(Property).where(Property.source_url.isnot(None))
+        if portal:
+            domain = PORTAL_DOMAINS.get(portal.lower())
+            if domain:
+                stmt = stmt.where(Property.source_url.ilike(f"%{domain}%"))
         result = await db.execute(stmt)
         properties = result.scalars().all()
 
@@ -658,15 +901,20 @@ async def update_all_prices(
                 else:
                     continue
 
-                # Scrape only to get current price and status
-                scraped_data = await scraper.scrape()
+                # Scrape only to get current price and status (30s timeout per property)
+                scraped_data = await asyncio.wait_for(scraper.scrape(), timeout=30.0)
                 new_price = scraped_data.get('price')
-                new_currency = scraped_data.get('currency', 'USD')
+                new_currency_str = scraped_data.get('currency', 'USD')
                 new_status = scraped_data.get('status', 'active')
 
                 if not new_price:
                     error_count += 1
                     continue
+
+                try:
+                    new_currency = Currency(new_currency_str)
+                except ValueError:
+                    new_currency = Currency.USD
 
                 # Update status (always, even if price didn't change)
                 property_obj.status = _parse_status(new_status)
@@ -674,13 +922,14 @@ async def update_all_prices(
                 # Check if price changed
                 old_price = float(property_obj.price)
                 if abs(new_price - old_price) > 0.01:  # Significant change
-                    # Calculate change percentage
-                    change_percentage = ((new_price - old_price) / old_price) * 100
+                    # Calculate change percentage (guard against stored price of 0)
+                    change_percentage = ((new_price - old_price) / old_price) * 100 if old_price > 0 else 0.0
 
                     # Create price history entry
                     price_history = PriceHistory(
                         property_id=property_obj.id,
                         price=new_price,
+                        previous_price=old_price,
                         currency=new_currency,
                         change_percentage=change_percentage,
                         recorded_at=datetime.utcnow(),
@@ -705,12 +954,13 @@ async def update_all_prices(
                         'change_percentage': round(change_percentage, 2),
                     })
 
+                await db.commit()
+
             except Exception as e:
+                await db.rollback()
                 error_count += 1
                 print(f"Error updating property {property_obj.id}: {str(e)}")
                 continue
-
-        await db.commit()
 
         return {
             'success': True,
@@ -722,15 +972,25 @@ async def update_all_prices(
         }
 
     except Exception as e:
+        await db.rollback()
         return {
             'success': False,
             'message': f'Error al actualizar precios: {str(e)}',
         }
 
 
+PORTAL_DOMAINS = {
+    "mercadolibre": "mercadolibre.com",
+    "argenprop":    "argenprop.com",
+    "zonaprop":     "zonaprop.com",
+    "remax":        "remax.com",
+}
+
+
 @router.post("/rescrape-all")
 async def rescrape_all_properties(
     db: AsyncSession = Depends(get_db),
+    portal: Optional[str] = Query(default=None, description="Filter by portal: mercadolibre, argenprop, zonaprop, remax"),
 ):
     """
     Re-scrape all properties from their source URLs.
@@ -739,30 +999,43 @@ async def rescrape_all_properties(
     try:
         # Get all properties with source URLs
         stmt = select(Property).where(Property.source_url.isnot(None))
+        if portal:
+            domain = PORTAL_DOMAINS.get(portal.lower())
+            if domain:
+                stmt = stmt.where(Property.source_url.ilike(f"%{domain}%"))
         result = await db.execute(stmt)
-        properties = result.scalars().all()
+        # Extract plain tuples to avoid expire_on_commit lazy-load issues across iterations
+        property_rows = [
+            (p.id, p.source_url, p.title) for p in result.scalars().all()
+        ]
 
         updated_count = 0
         error_count = 0
         errors = []
 
-        for property_obj in properties:
+        for prop_id, source_url, prop_title in property_rows:
             try:
-                # Determine scraper based on source URL
+                # Re-fetch a fresh ORM object for this iteration
+                prop_result = await db.execute(select(Property).where(Property.id == prop_id))
+                property_obj = prop_result.scalar_one_or_none()
+                if not property_obj:
+                    continue
+
+                # Determine scraper based on source URL (use the plain str, not the ORM attr)
                 scraper = None
-                if "argenprop.com" in property_obj.source_url:
-                    scraper = ArgenpropScraper(property_obj.source_url)
-                elif "zonaprop.com" in property_obj.source_url:
-                    scraper = ZonapropScraper(property_obj.source_url)
-                elif "remax.com" in property_obj.source_url:
-                    scraper = RemaxScraper(property_obj.source_url)
-                elif "mercadolibre.com" in property_obj.source_url:
-                    scraper = MercadoLibreScraper(property_obj.source_url)
+                if "argenprop.com" in source_url:
+                    scraper = ArgenpropScraper(source_url)
+                elif "zonaprop.com" in source_url:
+                    scraper = ZonapropScraper(source_url)
+                elif "remax.com" in source_url:
+                    scraper = RemaxScraper(source_url)
+                elif "mercadolibre.com" in source_url:
+                    scraper = MercadoLibreScraper(source_url)
                 else:
                     continue
 
-                # Full scrape
-                scraped_data = await scraper.scrape()
+                # Full scrape (30s timeout per property)
+                scraped_data = await asyncio.wait_for(scraper.scrape(), timeout=30.0)
 
                 if not scraped_data:
                     error_count += 1
@@ -778,36 +1051,44 @@ async def rescrape_all_properties(
                 }
 
                 # Update property with scraped data
-                old_price = float(property_obj.price)
+                old_price = float(property_obj.price) if property_obj.price else 0.0
                 location_data = scraped_data.get('location', {})
                 features = scraped_data.get('features', {})
                 contact = scraped_data.get('contact', {})
 
-                # Update basic fields
-                property_obj.title = scraped_data.get('title', property_obj.title)
-                property_obj.description = scraped_data.get('description', property_obj.description)
-                property_obj.property_type = scraped_data.get('property_type', property_obj.property_type)
-                property_obj.operation_type = scraped_data.get('operation_type', property_obj.operation_type)
+                # Update basic fields — only overwrite if scraper returned a non-empty value
+                property_obj.title = scraped_data.get('title') or property_obj.title
+                property_obj.description = scraped_data.get('description') or property_obj.description
+                property_obj.property_type = scraped_data.get('property_type') or property_obj.property_type
+                property_obj.operation_type = scraped_data.get('operation_type') or property_obj.operation_type
                 # Update status (convert to proper enum value)
                 if scraped_data.get('status'):
                     property_obj.status = _parse_status(scraped_data.get('status'))
 
                 # Update pricing
                 new_price = scraped_data.get('price')
-                if new_price and abs(new_price - old_price) > 0.01:
+                new_currency_str = scraped_data.get('currency', 'USD')
+                try:
+                    new_currency = Currency(new_currency_str)
+                except ValueError:
+                    new_currency = Currency.USD
+
+                if new_price is not None and abs(new_price - old_price) > 0.01:
                     # Price changed, create history entry
-                    change_percentage = ((new_price - old_price) / old_price) * 100
+                    change_percentage = ((new_price - old_price) / old_price) * 100 if old_price > 0 else 0.0
                     price_history = PriceHistory(
                         property_id=property_obj.id,
                         price=new_price,
-                        currency=scraped_data.get('currency', 'USD'),
+                        previous_price=old_price,
+                        currency=new_currency,
                         change_percentage=change_percentage,
                         recorded_at=datetime.utcnow(),
                     )
                     db.add(price_history)
 
-                property_obj.price = new_price or property_obj.price
-                property_obj.currency = scraped_data.get('currency', property_obj.currency)
+                if new_price is not None:
+                    property_obj.price = new_price
+                    property_obj.currency = new_currency
 
                 # Update location — normalize address fields
                 raw_address = scraped_data.get('address', property_obj.address)
@@ -853,40 +1134,30 @@ async def rescrape_all_properties(
                     if value is not None:
                         setattr(property_obj, field, value)
 
-                # Update images (delete old, add new)
-                # Delete existing images
-                for img in property_obj.images:
-                    await db.delete(img)
-                property_obj.images = []
-
-                # Add new images
-                if scraped_data.get('images'):
-                    for idx, img_url in enumerate(scraped_data['images'][:20]):
-                        image = PropertyImage(
-                            url=img_url,
-                            is_primary=(idx == 0),
-                            order=idx,
-                        )
-                        property_obj.images.append(image)
-
                 property_obj.scraped_at = datetime.utcnow()
-                updated_count += 1
+                # Only count as updated if price was actually obtained
+                if new_price is not None:
+                    updated_count += 1
+                else:
+                    errors.append(f"{(prop_title or '')[:60]}: precio no encontrado (posible bloqueo de bot)")
+                    logger.warning(f"[rescrape-all] price not found for {source_url}")
+                await db.commit()
 
             except Exception as e:
+                await db.rollback()
                 error_count += 1
-                errors.append(f"{property_obj.title}: {str(e)}")
-                print(f"Error re-scraping property {property_obj.id}: {str(e)}")
+                errors.append(f"{(prop_title or '')[:60]}: {str(e)}")
+                logger.error(f"Error re-scraping property {prop_id}: {str(e)}")
                 # Continue with other properties even if this one fails
                 continue
 
-        await db.commit()
-
         return {
             'success': True,
-            'message': f'Re-scraping completado: {updated_count} propiedades actualizadas, {error_count} errores',
-            'total_properties': len(properties),
+            'message': f'Re-scraping completado: {updated_count} actualizadas, {error_count} errores',
+            'total_properties': len(property_rows),
             'updated_count': updated_count,
             'error_count': error_count,
+            'errors': errors[:20],
         }
 
     except Exception as e:
@@ -899,16 +1170,16 @@ async def rescrape_all_properties(
 
 # Helper functions
 
-def _parse_status(status_str: str) -> str:
-    """Convert status string to valid enum value"""
+def _parse_status(status_str: str) -> PropertyStatus:
+    """Convert status string to PropertyStatus enum member"""
     status_map = {
-        'active': PropertyStatus.ACTIVE.value,
-        'sold': PropertyStatus.SOLD.value,
-        'rented': PropertyStatus.RENTED.value,
-        'reserved': PropertyStatus.RESERVED.value,
-        'removed': PropertyStatus.REMOVED.value,
+        'active': PropertyStatus.ACTIVE,
+        'sold': PropertyStatus.SOLD,
+        'rented': PropertyStatus.RENTED,
+        'reserved': PropertyStatus.RESERVED,
+        'removed': PropertyStatus.REMOVED,
     }
-    return status_map.get(status_str.lower(), PropertyStatus.ACTIVE.value)
+    return status_map.get(status_str.lower(), PropertyStatus.ACTIVE)
 
 
 def _scraped_to_property(scraped_data: dict, user_id: UUID) -> dict:

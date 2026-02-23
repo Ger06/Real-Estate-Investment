@@ -20,7 +20,7 @@ import {
   Chip,
   FormControl,
 } from '@mui/material';
-import { Edit as EditIcon, Save as SaveIcon, Close as CloseIcon, OpenInNew as OpenInNewIcon } from '@mui/icons-material';
+import { Edit as EditIcon, Save as SaveIcon, Close as CloseIcon, OpenInNew as OpenInNewIcon, Refresh as RefreshIcon } from '@mui/icons-material';
 import type { PropertyMapItem, PropertyUpdateData } from '../../../api/properties';
 import { propertiesApi } from '../../../api/properties';
 import { useQueryClient } from '@tanstack/react-query';
@@ -75,6 +75,7 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
     `${property.latitude}, ${property.longitude}`
   );
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const queryClient = useQueryClient();
 
   // Callback ref: fires once when the DOM element mounts.
@@ -127,6 +128,39 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
       console.error('Error updating property:', err);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRescrape = async () => {
+    setRefreshing(true);
+    try {
+      const result = await propertiesApi.rescrapeProperty(property.id);
+      if (result.success) {
+        const newStatus = result.new_status.toUpperCase();
+        queryClient.setQueriesData<{ items: PropertyMapItem[]; total: number }>(
+          { queryKey: ['properties-map'] },
+          (old) => {
+            if (!old) return old;
+            return {
+              ...old,
+              items: old.items.map((p) =>
+                p.id === property.id
+                  ? {
+                      ...p,
+                      price: result.new_price,
+                      status: newStatus,
+                      scraped_at: new Date().toISOString(),
+                    }
+                  : p
+              ),
+            };
+          }
+        );
+      }
+    } catch (err) {
+      console.error('Error rescraping property:', err);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -211,13 +245,36 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
               </Typography>
             )}
 
+            {property.last_price_change && (
+              <Typography variant="body2" sx={{ mt: 0.5 }}>
+                Últ. precio:{' '}
+                {new Date(property.last_price_change.changed_at).toLocaleDateString('es-AR')}{' '}
+                <Box
+                  component="span"
+                  sx={{
+                    color: property.last_price_change.change_pct < 0 ? 'error.main' : 'success.main',
+                    fontWeight: 'bold',
+                  }}
+                >
+                  {property.last_price_change.change_pct > 0 ? '+' : ''}
+                  {property.last_price_change.change_pct.toFixed(1)}%
+                </Box>
+              </Typography>
+            )}
+
+            {property.scraped_at && (
+              <Typography variant="body2" color="text.secondary">
+                Verificado: {new Date(property.scraped_at).toLocaleDateString('es-AR')}
+              </Typography>
+            )}
+
             {property.observations && (
               <Typography variant="body2" sx={{ mt: 0.5, fontStyle: 'italic', color: 'text.secondary' }}>
                 {property.observations}
               </Typography>
             )}
 
-            <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
+            <Box sx={{ display: 'flex', gap: 1, mt: 1, flexWrap: 'wrap' }}>
               {property.source_url && (
                 <Button
                   size="small"
@@ -229,6 +286,14 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
                   Publicación
                 </Button>
               )}
+              <Button
+                size="small"
+                startIcon={<RefreshIcon />}
+                onClick={handleRescrape}
+                disabled={refreshing || !property.source_url}
+              >
+                {refreshing ? 'Actualizando...' : 'Actualizar'}
+              </Button>
               <Button
                 size="small"
                 startIcon={<EditIcon />}
