@@ -61,8 +61,16 @@ class Settings(BaseSettings):
     @classmethod
     def assemble_db_connection(cls, v: Optional[str], info) -> str:
         if isinstance(v, str):
-            return v
-        
+            # Render (and Heroku) provide postgres:// or postgresql:// — rewrite to asyncpg scheme
+            url = v.replace("postgres://", "postgresql+asyncpg://", 1)
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            # Ensure SSL is enabled for managed cloud databases
+            if "?" not in url:
+                url += "?ssl=require"
+            elif "ssl=" not in url:
+                url += "&ssl=require"
+            return url
+
         values = info.data
         return PostgresDsn.build(
             scheme="postgresql+asyncpg",
