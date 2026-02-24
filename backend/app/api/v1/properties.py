@@ -185,6 +185,25 @@ async def scrape_property(
             await db.commit()
             await db.refresh(new_property)
 
+            # Auto-geocode after saving
+            try:
+                coords = await asyncio.to_thread(
+                    geocoding_service.geocode_address,
+                    address=new_property.address,
+                    street=new_property.street,
+                    street_number=new_property.street_number,
+                    neighborhood=new_property.neighborhood,
+                    city=new_property.city,
+                    province=new_property.province,
+                )
+                if coords:
+                    lat, lng = coords
+                    new_property.location = geocoding_service.make_point(lat, lng)
+                    await db.commit()
+                    await db.refresh(new_property)
+            except Exception as e:
+                logger.warning(f"[scrape] Auto-geocoding failed for {new_property.id}: {e}")
+
             property_id = new_property.id
 
         return PropertyScrapeResponse(
