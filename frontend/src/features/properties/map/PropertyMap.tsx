@@ -1,6 +1,6 @@
 /**
  * Property Map - Main page component
- * Interactive map with markers, clustering, filters, and heatmap
+ * Interactive map with markers, clustering, filters, and choropleth
  */
 import { useState } from 'react';
 import { Box, CircularProgress, Typography, Alert } from '@mui/material';
@@ -8,11 +8,13 @@ import { MapContainer, TileLayer } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
 import 'leaflet/dist/leaflet.css';
 
-import type { PropertyFilters } from '../../../api/properties';
+import type { PropertyFilters, ChoroplethFilters } from '../../../api/properties';
 import { useMapProperties } from '../../../hooks/useMapProperties';
+import { useChoropleth } from '../../../hooks/useChoropleth';
 import MapFilterPanel from './MapFilterPanel';
 import PropertyMarker from './PropertyMarker';
-import HeatmapLayer from './HeatmapLayer';
+import ChoroplethLayer from './ChoroplethLayer';
+import ChoroplethLegend from './ChoroplethLegend';
 
 // Buenos Aires center
 const DEFAULT_CENTER: [number, number] = [-34.6037, -58.3816];
@@ -20,10 +22,17 @@ const DEFAULT_ZOOM = 12;
 
 export default function PropertyMap() {
   const [filters, setFilters] = useState<PropertyFilters>({});
-  const [showHeatmap, setShowHeatmap] = useState(false);
-  const [heatmapMetric, setHeatmapMetric] = useState<'price' | 'price_per_sqm'>('price');
+  const [showChoropleth, setShowChoropleth] = useState(false);
+  const [choroplethAmbientes, setChoroplethAmbientes] = useState<number | null>(null);
 
   const { data, isLoading, error } = useMapProperties(filters);
+
+  const choroplethFilters: ChoroplethFilters = {
+    property_type: filters.property_type,
+    ambientes: choroplethAmbientes ?? undefined,
+  };
+
+  const { data: choroplethData } = useChoropleth(choroplethFilters, showChoropleth);
 
   const properties = data?.items || [];
 
@@ -33,10 +42,10 @@ export default function PropertyMap() {
         filters={filters}
         onApply={setFilters}
         totalResults={data?.total || 0}
-        showHeatmap={showHeatmap}
-        onToggleHeatmap={setShowHeatmap}
-        heatmapMetric={heatmapMetric}
-        onHeatmapMetricChange={setHeatmapMetric}
+        showChoropleth={showChoropleth}
+        onToggleChoropleth={setShowChoropleth}
+        choroplethAmbientes={choroplethAmbientes}
+        onAmbientesChange={setChoroplethAmbientes}
       />
 
       <Box sx={{ flex: 1, position: 'relative', borderRadius: 1, overflow: 'hidden' }}>
@@ -78,20 +87,20 @@ export default function PropertyMap() {
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
 
-          {!showHeatmap && (
-            <MarkerClusterGroup key={JSON.stringify(filters)} chunkedLoading>
-              {properties.map((prop) => (
-                <PropertyMarker key={prop.id} property={prop} />
-              ))}
-            </MarkerClusterGroup>
+          {showChoropleth && choroplethData && (
+            <ChoroplethLayer data={choroplethData} />
           )}
 
-          <HeatmapLayer
-            properties={properties}
-            metric={heatmapMetric}
-            visible={showHeatmap}
-          />
+          <MarkerClusterGroup key={JSON.stringify(filters)} chunkedLoading>
+            {properties.map((prop) => (
+              <PropertyMarker key={prop.id} property={prop} />
+            ))}
+          </MarkerClusterGroup>
         </MapContainer>
+
+        {showChoropleth && choroplethData && (
+          <ChoroplethLegend colorScale={choroplethData.color_scale} />
+        )}
       </Box>
     </Box>
   );

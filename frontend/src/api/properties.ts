@@ -137,6 +137,40 @@ export interface PropertyMapResponse {
   items: PropertyMapItem[];
 }
 
+// Choropleth interfaces
+export interface ChoroplethFilters {
+  property_type?: string;
+  ambientes?: number;
+}
+
+export interface ColorScaleBreakpoint {
+  level: number;
+  min: number | null;
+  max: number | null;
+  color: string;
+  label: string;
+}
+
+export interface ChoroplethFeatureProperties {
+  manzana_id: string | null;
+  barrio: string | null;
+  property_count: number;
+  avg_price_per_sqm: number;
+  color_level: number;
+}
+
+export interface ChoroplethResponse {
+  type: string;
+  features: Array<{
+    type: string;
+    geometry: any;
+    properties: ChoroplethFeatureProperties;
+  }>;
+  color_scale: ColorScaleBreakpoint[];
+  total_manzanas: number;
+  total_properties: number;
+}
+
 export interface GeocodeResponse {
   success: boolean;
   message: string;
@@ -220,6 +254,14 @@ export const propertiesApi = {
     const response = await apiClient.post('/properties/geocode-all', null, {
       params: { search_id: searchId },
     });
+    return response.data;
+  },
+
+  getChoropleth: async (filters: ChoroplethFilters = {}): Promise<ChoroplethResponse> => {
+    const params: Record<string, string | number> = {};
+    if (filters.property_type) params.property_type = filters.property_type;
+    if (filters.ambientes != null) params.ambientes = filters.ambientes;
+    const response = await apiClient.get<ChoroplethResponse>('/analytics/choropleth', { params });
     return response.data;
   },
 };

@@ -17,7 +17,9 @@
       "Bash(tasks \")",
       "Bash(npx tsc:*)",
       "Bash(npm run build:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(xargs grep:*)",
+      "Bash(python3:*)"
     ]
   }
 }

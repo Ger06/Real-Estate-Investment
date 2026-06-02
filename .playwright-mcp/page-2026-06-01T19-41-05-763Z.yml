@@ -1,0 +1,25 @@
+- generic [ref=e6]:
+  - heading "Análisis Inmobiliario" [level=1] [ref=e7]
+  - paragraph [ref=e8]: Inicia sesión para continuar
+  - generic [ref=e9]:
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - text: Correo Electrónico
+        - generic [ref=e12]: "*"
+      - generic [ref=e13]:
+        - textbox "Correo Electrónico" [active] [ref=e14]
+        - group:
+          - generic: Correo Electrónico *
+    - generic [ref=e15]:
+      - generic:
+        - text: Contraseña
+        - generic: "*"
+      - generic [ref=e16]:
+        - textbox "Contraseña" [ref=e17]
+        - group:
+          - generic: Contraseña *
+    - button "Iniciar Sesión" [ref=e18] [cursor=pointer]: Iniciar Sesión
+    - paragraph [ref=e20]:
+      - text: ¿No tienes cuenta?
+      - link "Regístrate aquí" [ref=e21] [cursor=pointer]:
+        - /url: /register

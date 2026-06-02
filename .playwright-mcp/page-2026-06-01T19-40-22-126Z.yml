@@ -1,0 +1,67 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: Análisis Inmobiliario
+      - paragraph
+  - navigation [ref=e7]:
+    - generic [ref=e9]:
+      - generic [ref=e11]: Real Estate
+      - separator [ref=e12]
+      - list [ref=e13]:
+        - listitem [ref=e14]:
+          - button "Dashboard" [ref=e15] [cursor=pointer]:
+            - img [ref=e17]
+            - generic [ref=e20]: Dashboard
+        - listitem [ref=e21]:
+          - button "Propiedades" [ref=e22] [cursor=pointer]:
+            - img [ref=e24]
+            - generic [ref=e27]: Propiedades
+        - listitem [ref=e28]:
+          - button "Mapa" [ref=e29] [cursor=pointer]:
+            - img [ref=e31]
+            - generic [ref=e34]: Mapa
+        - listitem [ref=e35]:
+          - button "Búsquedas" [ref=e36] [cursor=pointer]:
+            - img [ref=e38]
+            - generic [ref=e41]: Búsquedas
+        - listitem [ref=e42]:
+          - button "Análisis" [ref=e43] [cursor=pointer]:
+            - img [ref=e45]
+            - generic [ref=e48]: Análisis
+        - listitem [ref=e49]:
+          - button "Inversiones" [ref=e50] [cursor=pointer]:
+            - img [ref=e52]
+            - generic [ref=e55]: Inversiones
+      - separator [ref=e56]
+      - list [ref=e57]:
+        - listitem [ref=e58]:
+          - button "Cerrar Sesión" [ref=e59] [cursor=pointer]:
+            - img [ref=e61]
+            - generic [ref=e64]: Cerrar Sesión
+  - main [ref=e65]:
+    - generic [ref=e67]:
+      - heading "Dashboard" [level=4] [ref=e68]
+      - generic [ref=e69]:
+        - generic [ref=e72]:
+          - generic [ref=e73]:
+            - img [ref=e74]
+            - heading "Propiedades" [level=6] [ref=e76]
+          - heading [level=3] [ref=e77]:
+            - progressbar [ref=e78]:
+              - img [ref=e79]
+          - paragraph [ref=e81]: Total registradas
+        - generic [ref=e84]:
+          - generic [ref=e85]:
+            - img [ref=e86]
+            - heading "Análisis" [level=6] [ref=e88]
+          - heading "0" [level=3] [ref=e89]
+          - paragraph [ref=e90]: Análisis realizados
+        - generic [ref=e93]:
+          - generic [ref=e94]:
+            - img [ref=e95]
+            - heading "Inversiones" [level=6] [ref=e97]
+          - heading "$0" [level=3] [ref=e98]
+          - paragraph [ref=e99]: Total invertido
+        - generic [ref=e101]:
+          - heading "Actividad Reciente" [level=6] [ref=e102]
+          - paragraph [ref=e103]: No hay actividad reciente para mostrar

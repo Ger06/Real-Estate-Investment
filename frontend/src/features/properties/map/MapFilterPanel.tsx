@@ -16,6 +16,8 @@ import {
   FormControlLabel,
   Divider,
   Chip,
+  ToggleButtonGroup,
+  ToggleButton,
 } from '@mui/material';
 import { FilterList as FilterIcon, Clear as ClearIcon } from '@mui/icons-material';
 import type { PropertyFilters } from '../../../api/properties';
@@ -24,20 +26,20 @@ interface MapFilterPanelProps {
   filters: PropertyFilters;
   onApply: (filters: PropertyFilters) => void;
   totalResults: number;
-  showHeatmap: boolean;
-  onToggleHeatmap: (show: boolean) => void;
-  heatmapMetric: 'price' | 'price_per_sqm';
-  onHeatmapMetricChange: (metric: 'price' | 'price_per_sqm') => void;
+  showChoropleth: boolean;
+  onToggleChoropleth: (show: boolean) => void;
+  choroplethAmbientes: number | null;
+  onAmbientesChange: (ambientes: number | null) => void;
 }
 
 export default function MapFilterPanel({
   filters: initialFilters,
   onApply,
   totalResults,
-  showHeatmap,
-  onToggleHeatmap,
-  heatmapMetric,
-  onHeatmapMetricChange,
+  showChoropleth,
+  onToggleChoropleth,
+  choroplethAmbientes,
+  onAmbientesChange,
 }: MapFilterPanelProps) {
   const [filters, setFilters] = useState<PropertyFilters>(initialFilters);
 
@@ -223,23 +225,34 @@ export default function MapFilterPanel({
 
       <FormControlLabel
         control={
-          <Switch checked={showHeatmap} onChange={(e) => onToggleHeatmap(e.target.checked)} size="small" />
+          <Switch
+            checked={showChoropleth}
+            onChange={(e) => onToggleChoropleth(e.target.checked)}
+            size="small"
+          />
         }
-        label="Mapa de calor"
+        label="Mapa de precios por manzana"
       />
 
-      {showHeatmap && (
-        <FormControl size="small" fullWidth>
-          <InputLabel>Métrica</InputLabel>
-          <Select
-            value={heatmapMetric}
-            label="Métrica"
-            onChange={(e) => onHeatmapMetricChange(e.target.value as 'price' | 'price_per_sqm')}
+      {showChoropleth && (
+        <Box>
+          <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
+            Ambientes
+          </Typography>
+          <ToggleButtonGroup
+            value={choroplethAmbientes ?? 0}
+            exclusive
+            onChange={(_e, val: number) => onAmbientesChange(val === 0 ? null : val)}
+            size="small"
+            fullWidth
           >
-            <MenuItem value="price">Precio</MenuItem>
-            <MenuItem value="price_per_sqm">Precio/m²</MenuItem>
-          </Select>
-        </FormControl>
+            <ToggleButton value={0}>Todos</ToggleButton>
+            <ToggleButton value={1}>1</ToggleButton>
+            <ToggleButton value={2}>2</ToggleButton>
+            <ToggleButton value={3}>3</ToggleButton>
+            <ToggleButton value={4}>4+</ToggleButton>
+          </ToggleButtonGroup>
+        </Box>
       )}
 
       <Divider />

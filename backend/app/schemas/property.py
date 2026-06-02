@@ -224,3 +224,20 @@ class PropertyMapResponse(BaseModel):
     """Map response with all geocoded properties"""
     total: int
     items: List[PropertyMapItem]
+
+
+# Choropleth Schemas
+class ColorScaleBreakpoint(BaseModel):
+    level: int
+    min: Optional[float]
+    max: Optional[float]
+    color: str
+    label: str
+
+
+class ChoroplethResponse(BaseModel):
+    type: str = "FeatureCollection"
+    features: List[Dict[str, Any]]
+    color_scale: List[ColorScaleBreakpoint]
+    total_manzanas: int
+    total_properties: int
