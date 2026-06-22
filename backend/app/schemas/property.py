@@ -130,6 +130,26 @@ class PropertyImageResponse(BaseModel):
         from_attributes = True
 
 
+class PriceHistoryResponse(BaseModel):
+    """Price history entry response"""
+    id: UUID
+    price: float
+    previous_price: Optional[float] = None
+    currency: str
+    change_percentage: Optional[float] = None
+    recorded_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LastPriceChange(BaseModel):
+    """Summary of the most recent price change — for map markers"""
+    previous_price: float
+    change_pct: float
+    changed_at: datetime
+
+
 class PropertyResponse(BaseModel):
     """Property response schema"""
     id: UUID
@@ -178,6 +198,7 @@ class PropertyResponse(BaseModel):
     updated_at: Optional[datetime]
 
     images: List[PropertyImageResponse] = []
+    price_history: List[PriceHistoryResponse] = []
 
     class Config:
         from_attributes = True
@@ -215,6 +236,8 @@ class PropertyMapItem(BaseModel):
     primary_image_url: Optional[str] = None
     observations: Optional[str] = None
     source_url: Optional[str] = None
+    scraped_at: Optional[datetime] = None
+    last_price_change: Optional[LastPriceChange] = None
 
     class Config:
         from_attributes = True

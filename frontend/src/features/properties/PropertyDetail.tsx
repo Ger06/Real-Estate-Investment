@@ -26,8 +26,10 @@ import {
   OpenInNew as OpenInNewIcon,
   NavigateNext as NavigateNextIcon,
   NavigateBefore as NavigateBeforeIcon,
+  PriceChange as PriceChangeIcon,
 } from '@mui/icons-material';
 import { propertiesApi, type Property } from '../../api/properties';
+import UpdatePriceDialog from './UpdatePriceDialog';
 
 export default function PropertyDetail() {
   const { id } = useParams<{ id: string }>();
@@ -37,6 +39,7 @@ export default function PropertyDetail() {
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
+  const [updatePriceOpen, setUpdatePriceOpen] = useState(false);
 
   // Portal colors
   const getPortalColor = (source: string) => {
@@ -143,6 +146,13 @@ export default function PropertyDetail() {
           Volver a Propiedades
         </Button>
         <Box sx={{ display: 'flex', gap: 2 }}>
+          <Button
+            variant="outlined"
+            startIcon={<PriceChangeIcon />}
+            onClick={() => setUpdatePriceOpen(true)}
+          >
+            Actualizar precio
+          </Button>
           <Button variant="outlined" startIcon={<EditIcon />}>
             Editar
           </Button>
@@ -456,6 +466,15 @@ export default function PropertyDetail() {
           </Paper>
         </Grid>
       </Grid>
+
+      {property && (
+        <UpdatePriceDialog
+          open={updatePriceOpen}
+          onClose={() => setUpdatePriceOpen(false)}
+          property={property}
+          onSuccess={() => { setUpdatePriceOpen(false); loadProperty(); }}
+        />
+      )}
     </Box>
   );
 }
