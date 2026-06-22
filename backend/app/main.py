@@ -40,6 +40,18 @@ def _geometry_to_wkt(geometry: dict) -> str:
     raise ValueError(f"Unsupported geometry type: {geom_type}")
 
 
+def _run_migrations() -> None:
+    try:
+        from alembic.config import Config
+        from alembic import command
+        alembic_ini = Path(__file__).parent.parent / "alembic.ini"
+        cfg = Config(str(alembic_ini))
+        command.upgrade(cfg, "head")
+        logger.info("Migrations applied")
+    except Exception as e:
+        logger.error(f"Migration failed (non-fatal): {e}")
+
+
 async def _seed_barrios() -> None:
     if not BARRIOS_GEOJSON.exists():
         logger.warning("barrios.geojson not found, skipping seed")
@@ -98,6 +110,7 @@ async def _seed_barrios() -> None:
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
     setup_logging()
+    _run_migrations()
     await _seed_barrios()
     yield
 
