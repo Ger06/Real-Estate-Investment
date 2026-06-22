@@ -20,7 +20,7 @@ import {
   Chip,
   FormControl,
 } from '@mui/material';
-import { Edit as EditIcon, Save as SaveIcon, Close as CloseIcon, OpenInNew as OpenInNewIcon } from '@mui/icons-material';
+import { Edit as EditIcon, Save as SaveIcon, Close as CloseIcon, OpenInNew as OpenInNewIcon, Delete as DeleteIcon } from '@mui/icons-material';
 import type { PropertyMapItem, PropertyUpdateData } from '../../../api/properties';
 import { propertiesApi } from '../../../api/properties';
 import { useQueryClient } from '@tanstack/react-query';
@@ -75,6 +75,7 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
     `${property.latitude}, ${property.longitude}`
   );
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const queryClient = useQueryClient();
 
   // Callback ref: fires once when the DOM element mounts.
@@ -127,6 +128,28 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
       console.error('Error updating property:', err);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm('¿Eliminar esta propiedad? Esta acción no se puede deshacer.')) return;
+    setDeleting(true);
+    try {
+      await propertiesApi.deleteProperty(property.id);
+      queryClient.setQueriesData<{ items: PropertyMapItem[]; total: number }>(
+        { queryKey: ['properties-map'] },
+        (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            total: old.total - 1,
+            items: old.items.filter((p) => p.id !== property.id),
+          };
+        }
+      );
+    } catch (err) {
+      console.error('Error deleting property:', err);
+      setDeleting(false);
     }
   };
 
@@ -217,7 +240,7 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
               </Typography>
             )}
 
-            <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
+            <Box sx={{ display: 'flex', gap: 1, mt: 1, flexWrap: 'wrap' }}>
               {property.source_url && (
                 <Button
                   size="small"
@@ -235,6 +258,15 @@ function PopupContent({ property }: { property: PropertyMapItem }) {
                 onClick={() => setEditing(true)}
               >
                 Editar
+              </Button>
+              <Button
+                size="small"
+                color="error"
+                startIcon={<DeleteIcon />}
+                onClick={handleDelete}
+                disabled={deleting}
+              >
+                {deleting ? 'Eliminando...' : 'Eliminar'}
               </Button>
             </Box>
           </>

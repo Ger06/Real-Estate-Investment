@@ -59,15 +59,16 @@ async def get_price_trends():
 async def get_choropleth(
     property_type: Optional[str] = None,
     ambientes: Optional[int] = None,
+    granularity: str = "barrio",
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Returns a GeoJSON FeatureCollection of CABA city blocks (manzanas)
-    colored by average price per m² (USD) for active sale properties.
+    Returns a GeoJSON FeatureCollection colored by average price per m² (USD).
+    granularity='barrio'  → one polygon per neighborhood (48 in CABA)
+    granularity='manzana' → one polygon per city block (~20k in CABA)
     """
-    # Build optional filters (applied inside the active_props CTE)
     cte_extra = []
-    params: dict = {}
+    params: dict[str, str | int] = {}
 
     if property_type:
         cte_extra.append("AND UPPER(property_type::text) = UPPER(:property_type)")
@@ -85,10 +86,7 @@ async def get_choropleth(
 
     cte_extra_sql = "\n            ".join(cte_extra)
 
-    # Phase 1: spatial join using geometry (not geography) so the GiST index is used.
-    # Casting to geography on both sides disables index usage → 300s+; geometry → 0.1s.
-    # 0.0005 degrees ≈ 50m at Buenos Aires latitude (~34°S).
-    stats_sql = text(f"""
+    active_props_cte = f"""
         WITH active_props AS (
             SELECT
                 id,
@@ -102,59 +100,95 @@ async def get_choropleth(
             AND location IS NOT NULL
             {cte_extra_sql}
         )
-        SELECT m.id, m.manzana_id, m.barrio,
-               COUNT(p.id)::int AS property_count,
-               AVG(p.ppsm)::float AS avg_price_per_sqm
-        FROM manzanas m
-        JOIN active_props p ON ST_DWithin(p.geom, m.geom, 0.0005)
-        GROUP BY m.id, m.manzana_id, m.barrio
-        HAVING COUNT(p.id) >= 1
-    """)
+    """
 
-    stats_result = await db.execute(stats_sql, params)
-    stats_rows = stats_result.fetchall()
+    if granularity == "manzana":
+        # Phase 1: aggregate per city block using GiST-indexed ST_DWithin
+        stats_sql = text(active_props_cte + """
+            SELECT m.id, m.manzana_id,
+                   COUNT(p.id)::int AS property_count,
+                   AVG(p.ppsm)::float AS avg_price_per_sqm
+            FROM manzanas m
+            JOIN active_props p ON ST_DWithin(p.geom, m.geom, 0.002)
+            GROUP BY m.id, m.manzana_id
+            HAVING COUNT(p.id) >= 1
+        """)
+        stats_result = await db.execute(stats_sql, params)
+        stats_rows = stats_result.fetchall()
 
-    if not stats_rows:
-        return ChoroplethResponse(
-            features=[],
-            color_scale=COLOR_SCALE,
-            total_manzanas=0,
-            total_properties=0,
-        )
+        if not stats_rows:
+            return ChoroplethResponse(
+                features=[], color_scale=COLOR_SCALE,
+                total_barrios=0, total_properties=0,
+            )
 
-    # Phase 2: fetch simplified geometries for matched manzana IDs only.
-    manzana_ids = [row.id for row in stats_rows]
-    geom_sql = text("""
-        SELECT id, ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.0001))::json AS geometry
-        FROM manzanas
-        WHERE id = ANY(:ids)
-    """)
-    geom_result = await db.execute(geom_sql, {"ids": manzana_ids})
-    geom_by_id = {row.id: row.geometry for row in geom_result.fetchall()}
+        # Phase 2: simplified geometries for matched blocks only
+        manzana_ids = [row.id for row in stats_rows]
+        geom_sql = text("""
+            SELECT id, ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, 0.0001))::json AS geometry
+            FROM manzanas WHERE id = ANY(:ids)
+        """)
+        geom_result = await db.execute(geom_sql, {"ids": manzana_ids})
+        geom_by_id = {row.id: row.geometry for row in geom_result.fetchall()}
 
-    features = []
-    total_props = 0
+        features = []
+        total_props = 0
+        for row in stats_rows:
+            avg = row.avg_price_per_sqm or 0.0
+            level = _get_color_level(avg)
+            total_props += row.property_count
+            features.append({
+                "type": "Feature",
+                "geometry": geom_by_id.get(row.id),
+                "properties": {
+                    "barrio": row.manzana_id,
+                    "property_count": row.property_count,
+                    "avg_price_per_sqm": round(avg, 0),
+                    "color_level": level,
+                },
+            })
 
-    for row in stats_rows:
-        avg = row.avg_price_per_sqm or 0.0
-        level = _get_color_level(avg)
-        total_props += row.property_count
+    else:
+        # granularity == "barrio": direct join to official neighborhood polygons
+        sql = text(active_props_cte + """
+            SELECT b.nombre AS barrio,
+                   COUNT(DISTINCT p.id)::int AS property_count,
+                   AVG(p.ppsm)::float AS avg_price_per_sqm,
+                   ST_AsGeoJSON(ST_SimplifyPreserveTopology(b.geom::geometry, 0.0002))::json AS geometry
+            FROM barrios b
+            JOIN active_props p ON ST_Intersects(p.geom, b.geom::geometry)
+            GROUP BY b.id, b.nombre, b.geom
+            HAVING COUNT(p.id) >= 1
+        """)
+        result = await db.execute(sql, params)
+        rows = result.fetchall()
 
-        features.append({
-            "type": "Feature",
-            "geometry": geom_by_id.get(row.id),
-            "properties": {
-                "manzana_id": row.manzana_id,
-                "barrio": row.barrio,
-                "property_count": row.property_count,
-                "avg_price_per_sqm": round(avg, 0),
-                "color_level": level,
-            },
-        })
+        if not rows:
+            return ChoroplethResponse(
+                features=[], color_scale=COLOR_SCALE,
+                total_barrios=0, total_properties=0,
+            )
+
+        features = []
+        total_props = 0
+        for row in rows:
+            avg = row.avg_price_per_sqm or 0.0
+            level = _get_color_level(avg)
+            total_props += row.property_count
+            features.append({
+                "type": "Feature",
+                "geometry": row.geometry,
+                "properties": {
+                    "barrio": row.barrio,
+                    "property_count": row.property_count,
+                    "avg_price_per_sqm": round(avg, 0),
+                    "color_level": level,
+                },
+            })
 
     return ChoroplethResponse(
         features=features,
         color_scale=COLOR_SCALE,
-        total_manzanas=len(features),
+        total_barrios=len(features),
         total_properties=total_props,
     )

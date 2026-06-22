@@ -18,6 +18,7 @@ from app.models.saved_search import SavedSearch
 from app.models.pending_property import PendingProperty, PendingPropertyStatus
 from app.models.remax_cache import RemaxLocationCache, RemaxPropertyTypeCache
 from app.models.manzana import Manzana
+from app.models.barrio import Barrio
 
 __all__ = [
     "User",
@@ -40,4 +41,5 @@ __all__ = [
     "RemaxLocationCache",
     "RemaxPropertyTypeCache",
     "Manzana",
+    "Barrio",
 ]

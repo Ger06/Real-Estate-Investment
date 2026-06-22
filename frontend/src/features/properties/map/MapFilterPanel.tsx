@@ -30,6 +30,8 @@ interface MapFilterPanelProps {
   onToggleChoropleth: (show: boolean) => void;
   choroplethAmbientes: number | null;
   onAmbientesChange: (ambientes: number | null) => void;
+  choroplethGranularity: 'manzana' | 'barrio';
+  onGranularityChange: (granularity: 'manzana' | 'barrio') => void;
 }
 
 export default function MapFilterPanel({
@@ -40,6 +42,8 @@ export default function MapFilterPanel({
   onToggleChoropleth,
   choroplethAmbientes,
   onAmbientesChange,
+  choroplethGranularity,
+  onGranularityChange,
 }: MapFilterPanelProps) {
   const [filters, setFilters] = useState<PropertyFilters>(initialFilters);
 
@@ -231,27 +235,45 @@ export default function MapFilterPanel({
             size="small"
           />
         }
-        label="Mapa de precios por manzana"
+        label="Mapa de precios"
       />
 
       {showChoropleth && (
-        <Box>
-          <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-            Ambientes
-          </Typography>
-          <ToggleButtonGroup
-            value={choroplethAmbientes ?? 0}
-            exclusive
-            onChange={(_e, val: number) => onAmbientesChange(val === 0 ? null : val)}
-            size="small"
-            fullWidth
-          >
-            <ToggleButton value={0}>Todos</ToggleButton>
-            <ToggleButton value={1}>1</ToggleButton>
-            <ToggleButton value={2}>2</ToggleButton>
-            <ToggleButton value={3}>3</ToggleButton>
-            <ToggleButton value={4}>4+</ToggleButton>
-          </ToggleButtonGroup>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <Box>
+            <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
+              Granularidad
+            </Typography>
+            <ToggleButtonGroup
+              value={choroplethGranularity}
+              exclusive
+              onChange={(_e, val: 'manzana' | 'barrio') => { if (val) onGranularityChange(val); }}
+              size="small"
+              fullWidth
+            >
+              <ToggleButton value="barrio">Barrio</ToggleButton>
+              <ToggleButton value="manzana">Cuadra</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
+
+          <Box>
+            <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
+              Ambientes
+            </Typography>
+            <ToggleButtonGroup
+              value={choroplethAmbientes ?? 0}
+              exclusive
+              onChange={(_e, val: number) => onAmbientesChange(val === 0 ? null : val)}
+              size="small"
+              fullWidth
+            >
+              <ToggleButton value={0}>Todos</ToggleButton>
+              <ToggleButton value={1}>1</ToggleButton>
+              <ToggleButton value={2}>2</ToggleButton>
+              <ToggleButton value={3}>3</ToggleButton>
+              <ToggleButton value={4}>4+</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
         </Box>
       )}
 

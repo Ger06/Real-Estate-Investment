@@ -24,12 +24,14 @@ export default function PropertyMap() {
   const [filters, setFilters] = useState<PropertyFilters>({});
   const [showChoropleth, setShowChoropleth] = useState(false);
   const [choroplethAmbientes, setChoroplethAmbientes] = useState<number | null>(null);
+  const [choroplethGranularity, setChoroplethGranularity] = useState<'manzana' | 'barrio'>('barrio');
 
   const { data, isLoading, error } = useMapProperties(filters);
 
   const choroplethFilters: ChoroplethFilters = {
     property_type: filters.property_type,
     ambientes: choroplethAmbientes ?? undefined,
+    granularity: choroplethGranularity,
   };
 
   const { data: choroplethData } = useChoropleth(choroplethFilters, showChoropleth);
@@ -46,6 +48,8 @@ export default function PropertyMap() {
         onToggleChoropleth={setShowChoropleth}
         choroplethAmbientes={choroplethAmbientes}
         onAmbientesChange={setChoroplethAmbientes}
+        choroplethGranularity={choroplethGranularity}
+        onGranularityChange={setChoroplethGranularity}
       />
 
       <Box sx={{ flex: 1, position: 'relative', borderRadius: 1, overflow: 'hidden' }}>

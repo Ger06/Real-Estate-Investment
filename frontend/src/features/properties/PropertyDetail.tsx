@@ -35,6 +35,7 @@ export default function PropertyDetail() {
   const [property, setProperty] = useState<Property | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [deleting, setDeleting] = useState(false);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
 
   // Portal colors
@@ -55,6 +56,19 @@ export default function PropertyDetail() {
   useEffect(() => {
     loadProperty();
   }, [id]);
+
+  const handleDelete = async () => {
+    if (!id) return;
+    if (!window.confirm('¿Eliminar esta propiedad? Esta acción no se puede deshacer.')) return;
+    try {
+      setDeleting(true);
+      await propertiesApi.deleteProperty(id);
+      navigate('/properties');
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Error al eliminar la propiedad');
+      setDeleting(false);
+    }
+  };
 
   const loadProperty = async () => {
     if (!id) return;
@@ -132,8 +146,14 @@ export default function PropertyDetail() {
           <Button variant="outlined" startIcon={<EditIcon />}>
             Editar
           </Button>
-          <Button variant="outlined" color="error" startIcon={<DeleteIcon />}>
-            Eliminar
+          <Button
+            variant="outlined"
+            color="error"
+            startIcon={<DeleteIcon />}
+            onClick={handleDelete}
+            disabled={deleting}
+          >
+            {deleting ? 'Eliminando...' : 'Eliminar'}
           </Button>
         </Box>
       </Box>

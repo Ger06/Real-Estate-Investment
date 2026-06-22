@@ -239,5 +239,5 @@ class ChoroplethResponse(BaseModel):
     type: str = "FeatureCollection"
     features: List[Dict[str, Any]]
     color_scale: List[ColorScaleBreakpoint]
-    total_manzanas: int
+    total_barrios: int
     total_properties: int

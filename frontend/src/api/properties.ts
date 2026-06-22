@@ -141,6 +141,7 @@ export interface PropertyMapResponse {
 export interface ChoroplethFilters {
   property_type?: string;
   ambientes?: number;
+  granularity?: 'manzana' | 'barrio';
 }
 
 export interface ColorScaleBreakpoint {
@@ -152,7 +153,6 @@ export interface ColorScaleBreakpoint {
 }
 
 export interface ChoroplethFeatureProperties {
-  manzana_id: string | null;
   barrio: string | null;
   property_count: number;
   avg_price_per_sqm: number;
@@ -167,7 +167,7 @@ export interface ChoroplethResponse {
     properties: ChoroplethFeatureProperties;
   }>;
   color_scale: ColorScaleBreakpoint[];
-  total_manzanas: number;
+  total_barrios: number;
   total_properties: number;
 }
 
@@ -250,6 +250,10 @@ export const propertiesApi = {
     return response.data;
   },
 
+  deleteProperty: async (id: string): Promise<void> => {
+    await apiClient.delete(`/properties/${id}`);
+  },
+
   geocodeBySearch: async (searchId: string): Promise<GeocodeResponse> => {
     const response = await apiClient.post('/properties/geocode-all', null, {
       params: { search_id: searchId },
@@ -261,6 +265,7 @@ export const propertiesApi = {
     const params: Record<string, string | number> = {};
     if (filters.property_type) params.property_type = filters.property_type;
     if (filters.ambientes != null) params.ambientes = filters.ambientes;
+    if (filters.granularity) params.granularity = filters.granularity;
     const response = await apiClient.get<ChoroplethResponse>('/analytics/choropleth', { params });
     return response.data;
   },
