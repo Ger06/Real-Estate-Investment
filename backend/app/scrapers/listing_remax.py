@@ -60,7 +60,7 @@ class RemaxListingScraper(BaseListingScraper):
         self._last_raw_count = 0  # Track raw results for Deep Scrape termination
         self._db: Optional[AsyncSession] = None
         # Cache loaded from DB (populated by load_cache_from_db)
-        self._location_cache: Dict[str, Tuple[str, str]] = {}
+        self._location_cache: Dict[str, Tuple[str, str, Optional[str]]] = {}
         self._property_type_cache: Dict[str, str] = {}
         self._cache_loaded = False
 
@@ -89,7 +89,7 @@ class RemaxListingScraper(BaseListingScraper):
         locations = result.scalars().all()
 
         self._location_cache = {
-            loc.name: (loc.remax_id, loc.display_name)
+            loc.name: (loc.remax_id, loc.display_name, loc.parent_location)
             for loc in locations
         }
         logger.info(f"Loaded {len(self._location_cache)} Remax locations from cache")
@@ -106,7 +106,7 @@ class RemaxListingScraper(BaseListingScraper):
         logger.info(f"Loaded {len(self._property_type_cache)} Remax property types from cache")
         self._cache_loaded = True
 
-    def _get_location_from_cache(self, location_name: str) -> Optional[Tuple[str, str]]:
+    def _get_location_from_cache(self, location_name: str) -> Optional[Tuple[str, str, Optional[str]]]:
         """
         Get location ID from cache.
 
@@ -114,7 +114,7 @@ class RemaxListingScraper(BaseListingScraper):
             location_name: Location name to look up
 
         Returns:
-            Tuple of (remax_id, display_name) or None if not found
+            Tuple of (remax_id, display_name, parent_location) or None if not found
         """
         normalized = location_name.lower().strip()
         return self._location_cache.get(normalized)
@@ -170,8 +170,8 @@ class RemaxListingScraper(BaseListingScraper):
         Uses cached location and property type IDs from the database.
         If cache is not loaded or location not found, raises ValueError.
 
-        URL format:
-        /listings/buy?page=0&pageSize=24&sort=-createdAt&in:operationId=1&in:typeId=1,2&pricein=1:min:max&locations=in::::ID@Name:::
+        URL format (barrio):  /listings/buy?...&locations=in::::25012@Coghlan# Capital Federal:::
+        URL format (region): /listings/buy?...&locations=in:CF@Capital Federal::::::
         """
         params = self.search_params
         logger.debug(f"[remax] Search params received: {params}")
@@ -221,6 +221,7 @@ class RemaxListingScraper(BaseListingScraper):
 
         location_id = None
         location_name = None
+        location_parent = None
         location_not_found = None  # Track which location wasn't found
 
         # Priority: first neighborhood, then city
@@ -229,7 +230,7 @@ class RemaxListingScraper(BaseListingScraper):
                 nb_key = nb.lower().strip()
                 cached = self._get_location_from_cache(nb_key)
                 if cached:
-                    location_id, location_name = cached
+                    location_id, location_name, location_parent = cached
                     logger.debug(f"[remax] Found location from neighborhood '{nb}': ID={location_id}, Name={location_name}")
                     break
                 else:
@@ -239,13 +240,13 @@ class RemaxListingScraper(BaseListingScraper):
             city_key = city.lower().strip()
             cached = self._get_location_from_cache(city_key)
             if cached:
-                location_id, location_name = cached
+                location_id, location_name, location_parent = cached
                 logger.debug(f"[remax] Found location from city '{city}': ID={location_id}, Name={location_name}")
             else:
                 # Try partial match in cache
-                for key, (lid, lname) in self._location_cache.items():
+                for key, (lid, lname, lparent) in self._location_cache.items():
                     if city_key in key or key in city_key:
-                        location_id, location_name = lid, lname
+                        location_id, location_name, location_parent = lid, lname, lparent
                         logger.debug(f"[remax] Found location from partial match '{city}' -> '{key}': ID={location_id}")
                         break
 
@@ -262,8 +263,15 @@ class RemaxListingScraper(BaseListingScraper):
             )
 
         if location_id:
-            # Format: in::::ID@Name:::
-            location_param = f"in::::{location_id}@{location_name}:::"
+            if not location_id.isnumeric():
+                # Regional code (e.g. CF for Capital Federal)
+                # Format: in:CF@Capital Federal::::::
+                location_param = f"in:{location_id}@{location_name}::::::"
+            else:
+                # Numeric barrio ID (e.g. 25012 for Coghlan)
+                # Format: in::::25012@Coghlan# Capital Federal:::
+                parent_suffix = f"# {location_parent}" if location_parent else ""
+                location_param = f"in::::{location_id}@{location_name}{parent_suffix}:::"
             query_parts.append(f"locations={quote(location_param, safe='')}")
         else:
             logger.debug("[remax] No location specified, using global search")

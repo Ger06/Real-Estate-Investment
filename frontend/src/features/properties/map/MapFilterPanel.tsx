@@ -16,6 +16,8 @@ import {
   FormControlLabel,
   Divider,
   Chip,
+  ToggleButtonGroup,
+  ToggleButton,
 } from '@mui/material';
 import { FilterList as FilterIcon, Clear as ClearIcon } from '@mui/icons-material';
 import type { PropertyFilters } from '../../../api/properties';
@@ -24,24 +26,24 @@ interface MapFilterPanelProps {
   filters: PropertyFilters;
   onApply: (filters: PropertyFilters) => void;
   totalResults: number;
-  showHeatmap: boolean;
-  onToggleHeatmap: (show: boolean) => void;
-  heatmapMetric: 'price' | 'price_per_sqm' | 'price_change';
-  onHeatmapMetricChange: (metric: 'price' | 'price_per_sqm' | 'price_change') => void;
-  priceChangeDays: number | null;
-  onPriceChangeDaysChange: (days: number | null) => void;
+  showChoropleth: boolean;
+  onToggleChoropleth: (show: boolean) => void;
+  choroplethAmbientes: number | null;
+  onAmbientesChange: (ambientes: number | null) => void;
+  choroplethGranularity: 'manzana' | 'barrio';
+  onGranularityChange: (granularity: 'manzana' | 'barrio') => void;
 }
 
 export default function MapFilterPanel({
   filters: initialFilters,
   onApply,
   totalResults,
-  showHeatmap,
-  onToggleHeatmap,
-  heatmapMetric,
-  onHeatmapMetricChange,
-  priceChangeDays,
-  onPriceChangeDaysChange,
+  showChoropleth,
+  onToggleChoropleth,
+  choroplethAmbientes,
+  onAmbientesChange,
+  choroplethGranularity,
+  onGranularityChange,
 }: MapFilterPanelProps) {
   const [filters, setFilters] = useState<PropertyFilters>(initialFilters);
 
@@ -227,43 +229,52 @@ export default function MapFilterPanel({
 
       <FormControlLabel
         control={
-          <Switch checked={showHeatmap} onChange={(e) => onToggleHeatmap(e.target.checked)} size="small" />
+          <Switch
+            checked={showChoropleth}
+            onChange={(e) => onToggleChoropleth(e.target.checked)}
+            size="small"
+          />
         }
-        label="Mapa de calor"
+        label="Mapa de precios"
       />
 
-      {showHeatmap && (
-        <FormControl size="small" fullWidth>
-          <InputLabel>Métrica</InputLabel>
-          <Select
-            value={heatmapMetric}
-            label="Métrica"
-            onChange={(e) => onHeatmapMetricChange(e.target.value as 'price' | 'price_per_sqm' | 'price_change')}
-          >
-            <MenuItem value="price">Precio</MenuItem>
-            <MenuItem value="price_per_sqm">Precio/m²</MenuItem>
-            <MenuItem value="price_change">Variación de precio</MenuItem>
-          </Select>
-        </FormControl>
-      )}
+      {showChoropleth && (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <Box>
+            <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
+              Granularidad
+            </Typography>
+            <ToggleButtonGroup
+              value={choroplethGranularity}
+              exclusive
+              onChange={(_e, val: 'manzana' | 'barrio') => { if (val) onGranularityChange(val); }}
+              size="small"
+              fullWidth
+            >
+              <ToggleButton value="barrio">Barrio</ToggleButton>
+              <ToggleButton value="manzana">Cuadra</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
 
-      {showHeatmap && heatmapMetric === 'price_change' && (
-        <FormControl fullWidth size="small">
-          <InputLabel>Período</InputLabel>
-          <Select
-            value={priceChangeDays ?? 'all'}
-            label="Período"
-            onChange={(e) =>
-              onPriceChangeDaysChange(e.target.value === 'all' ? null : Number(e.target.value))
-            }
-          >
-            <MenuItem value={7}>Últimos 7 días</MenuItem>
-            <MenuItem value={30}>Últimos 30 días</MenuItem>
-            <MenuItem value={90}>Últimos 90 días</MenuItem>
-            <MenuItem value={365}>Último año</MenuItem>
-            <MenuItem value="all">Todo el historial</MenuItem>
-          </Select>
-        </FormControl>
+          <Box>
+            <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
+              Ambientes
+            </Typography>
+            <ToggleButtonGroup
+              value={choroplethAmbientes ?? 0}
+              exclusive
+              onChange={(_e, val: number) => onAmbientesChange(val === 0 ? null : val)}
+              size="small"
+              fullWidth
+            >
+              <ToggleButton value={0}>Todos</ToggleButton>
+              <ToggleButton value={1}>1</ToggleButton>
+              <ToggleButton value={2}>2</ToggleButton>
+              <ToggleButton value={3}>3</ToggleButton>
+              <ToggleButton value={4}>4+</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
+        </Box>
       )}
 
       <Divider />

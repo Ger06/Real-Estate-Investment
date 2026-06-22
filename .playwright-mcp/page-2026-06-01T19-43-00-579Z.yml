@@ -1,0 +1,159 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: Análisis Inmobiliario
+      - paragraph
+  - navigation [ref=e7]:
+    - generic [ref=e9]:
+      - generic [ref=e11]: Real Estate
+      - separator [ref=e12]
+      - list [ref=e13]:
+        - listitem [ref=e14]:
+          - button "Dashboard" [ref=e15] [cursor=pointer]:
+            - img [ref=e17]
+            - generic [ref=e20]: Dashboard
+        - listitem [ref=e21]:
+          - button "Propiedades" [ref=e22] [cursor=pointer]:
+            - img [ref=e24]
+            - generic [ref=e27]: Propiedades
+        - listitem [ref=e28]:
+          - button "Mapa" [ref=e29] [cursor=pointer]:
+            - img [ref=e31]
+            - generic [ref=e34]: Mapa
+        - listitem [ref=e35]:
+          - button "Búsquedas" [ref=e36] [cursor=pointer]:
+            - img [ref=e38]
+            - generic [ref=e41]: Búsquedas
+        - listitem [ref=e42]:
+          - button "Análisis" [ref=e43] [cursor=pointer]:
+            - img [ref=e45]
+            - generic [ref=e48]: Análisis
+        - listitem [ref=e49]:
+          - button "Inversiones" [ref=e50] [cursor=pointer]:
+            - img [ref=e52]
+            - generic [ref=e55]: Inversiones
+      - separator [ref=e56]
+      - list [ref=e57]:
+        - listitem [ref=e58]:
+          - button "Cerrar Sesión" [ref=e59] [cursor=pointer]:
+            - img [ref=e61]
+            - generic [ref=e64]: Cerrar Sesión
+  - main [ref=e65]:
+    - generic [ref=e67]:
+      - generic [ref=e68]:
+        - generic [ref=e69]:
+          - img [ref=e70]
+          - heading "Filtros" [level=6] [ref=e72]
+          - generic [ref=e74]: 0 resultados
+        - separator [ref=e75]
+        - generic [ref=e76]:
+          - generic: Tipo de propiedad
+          - generic [ref=e77]:
+            - combobox [ref=e78] [cursor=pointer]
+            - textbox
+            - img
+            - group:
+              - generic: Tipo de propiedad
+        - generic [ref=e79]:
+          - generic: Operación
+          - generic [ref=e80]:
+            - combobox [ref=e81] [cursor=pointer]
+            - textbox
+            - img
+            - group:
+              - generic: Operación
+        - generic [ref=e82]:
+          - generic: Estado
+          - generic [ref=e83]:
+            - combobox [ref=e84] [cursor=pointer]
+            - textbox
+            - img
+            - group:
+              - generic: Estado
+        - generic [ref=e85]:
+          - generic: Moneda
+          - generic [ref=e86]:
+            - combobox [ref=e87] [cursor=pointer]
+            - textbox
+            - img
+            - group:
+              - generic: Moneda
+        - generic [ref=e88]:
+          - generic [ref=e89]:
+            - generic: Precio mín
+            - generic [ref=e90]:
+              - spinbutton "Precio mín" [ref=e91]
+              - group:
+                - generic: Precio mín
+          - generic [ref=e92]:
+            - generic: Precio máx
+            - generic [ref=e93]:
+              - spinbutton "Precio máx" [ref=e94]
+              - group:
+                - generic: Precio máx
+        - generic [ref=e95]:
+          - generic [ref=e96]:
+            - generic: Área mín (m²)
+            - generic [ref=e97]:
+              - spinbutton "Área mín (m²)" [ref=e98]
+              - group:
+                - generic: Área mín (m²)
+          - generic [ref=e99]:
+            - generic: Área máx (m²)
+            - generic [ref=e100]:
+              - spinbutton "Área máx (m²)" [ref=e101]
+              - group:
+                - generic: Área máx (m²)
+        - generic [ref=e102]:
+          - generic [ref=e103]:
+            - generic: Amb. mín
+            - generic [ref=e104]:
+              - spinbutton "Amb. mín" [ref=e105]
+              - group:
+                - generic: Amb. mín
+          - generic [ref=e106]:
+            - generic: Baños mín
+            - generic [ref=e107]:
+              - spinbutton "Baños mín" [ref=e108]
+              - group:
+                - generic: Baños mín
+        - generic [ref=e109]:
+          - generic: Barrio
+          - generic [ref=e110]:
+            - textbox "Barrio" [ref=e111]
+            - group:
+              - generic: Barrio
+        - generic [ref=e112]:
+          - generic: Ciudad
+          - generic [ref=e113]:
+            - textbox "Ciudad" [ref=e114]
+            - group:
+              - generic: Ciudad
+        - separator [ref=e115]
+        - generic [ref=e116] [cursor=pointer]:
+          - checkbox "Mapa de precios por manzana" [ref=e119]
+          - generic [ref=e122]: Mapa de precios por manzana
+        - separator [ref=e123]
+        - generic [ref=e124]:
+          - button "Aplicar" [ref=e125] [cursor=pointer]: Aplicar
+          - button "Limpiar" [ref=e126] [cursor=pointer]:
+            - img [ref=e128]
+            - text: Limpiar
+      - generic [ref=e130]:
+        - generic [ref=e131]:
+          - progressbar [ref=e132]:
+            - img [ref=e133]
+          - paragraph [ref=e135]: Cargando propiedades...
+        - generic [ref=e136]:
+          - generic:
+            - generic [ref=e137]:
+              - button "Zoom in" [ref=e138] [cursor=pointer]: +
+              - button "Zoom out" [ref=e139] [cursor=pointer]: −
+            - generic [ref=e140]:
+              - link "Leaflet" [ref=e141] [cursor=pointer]:
+                - /url: https://leafletjs.com
+                - img [ref=e142]
+                - text: Leaflet
+              - text: "| ©"
+              - link "OpenStreetMap" [ref=e146] [cursor=pointer]:
+                - /url: https://www.openstreetmap.org/copyright
